@@ -26,7 +26,7 @@ srv=$(grep -n "^server {" "$ENGINE"|head -1|cut -d: -f1); end=$(awk -v s="$srv" 
 sed -n "${start},${end}p" "$ENGINE" > "$PREFIX/initblock.conf"
 source "$HERE/lib_initblock.sh"; prepend_lua_path "$PREFIX/initblock.conf" "$HERE/../lua"
 
-ROUTES="plain strs junk"
+ROUTES="plain strs junk bools"
 {
 cat <<'EOF'
 worker_processes 1; error_log logs/error.log warn; pid logs/nginx.pid;
@@ -53,6 +53,10 @@ cat <<'EOF'
                                                      adaptive_cc_init_frac=0.1, adaptive_cc_min=80, max_more_tries=3}) end)
     _G.register_route("junk",  function() return R({cross_tier_fallback="maybe", adaptive_cc_hold_when_idle="maybe",
                                                      adaptive_cc_init=500}) end)
+    -- strings in every other boolean option the engine reads (review: they used plain truthiness)
+    _G.register_route("bools", function() return R({adaptive_cc="off", session_affinity_enabled="false",
+                                                     expose_routed_peer="on", bodylog_default_enabled="no",
+                                                     ttft_429_default_enabled="False"}) end)
   }
 EOF
 port=19760
@@ -71,7 +75,7 @@ sleep 3; "$OPENRESTY" -p "$PREFIX" -c "$PREFIX/nginx.conf"; sleep 2
 
 P=0; F=0; ok(){ echo "  ✓ $1"; P=$((P+1)); }; no(){ echo "  ✗ FAIL: $1"; F=$((F+1)); }
 H="Content-Type: application/json"; A="Authorization: Bearer $KEY"
-PLAIN=http://127.0.0.1:19760; STRS=http://127.0.0.1:19761; JUNK=http://127.0.0.1:19762
+PLAIN=http://127.0.0.1:19760; STRS=http://127.0.0.1:19761; JUNK=http://127.0.0.1:19762; BOOLS=http://127.0.0.1:19763
 body(){ echo "{\"stream_options\":{\"include_usage\":true},\"model\":\"x\",\"stream\":true,\"chunk_delay_ms\":$1,\"max_tokens\":$2,\"prefill_delay_ms\":15,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"; }
 fire(){ curl -s -o /dev/null -N -H "$A" -H "$H" -d "$(body $2 $3)" "$1/v1/chat/completions"; }
 # keep ~n overlapping requests for dur seconds (chunk ms x tokens per request)
@@ -119,6 +123,11 @@ n=${drift%% |*}; rest=${drift#*| }
 grep -q 'cross_tier_fallback=False (string) read as false' "$PREFIX/logs/error.log" && ok "③ WARN for the non-boolean \"False\"" || no "③ no WARN for \"False\""
 [ "$(ro $JUNK 'D["cross_tier_fallback"]["value"], D["adaptive_cc_hold_when_idle"]["value"]')" = "(False, True)" ] && ok "③ \"maybe\" -> defaults (cross_tier off, hold on)" || no "③ junk: $(ro $JUNK 'D["cross_tier_fallback"]["value"], D["adaptive_cc_hold_when_idle"]["value"]')"
 [ "$(grep -c 'is not a boolean - using the default' "$PREFIX/logs/error.log")" -ge 2 ] && ok "③ ERR for both unrecognised values" || no "③ ERR lines: $(grep -c 'is not a boolean' "$PREFIX/logs/error.log")"
+
+# ③ the other boolean options parse the same way (string "off"/"false"/"no" must not mean on)
+[ "$(ro $BOOLS 'D["adaptive_cc"]["value"], D["session_affinity_enabled"]["value"], D["expose_routed_peer"]["value"]')" = "(False, False, True)" ] && ok "③ adaptive_cc \"off\" -> off, session_affinity \"false\" -> off, expose_routed_peer \"on\" -> on" || no "③ bools: $(ro $BOOLS 'D["adaptive_cc"]["value"], D["session_affinity_enabled"]["value"], D["expose_routed_peer"]["value"]')"
+[ "$(ro $BOOLS 'd["other_options"].get("bodylog_default_enabled"), d["other_options"].get("ttft_429_default_enabled"), d.get("adaptive_cc_derived")')" = "(False, False, None)" ] && ok "③ bodylog \"no\" and ttft_429 \"False\" -> off; adaptive off has no derived bounds" || no "③ bools other: $(ro $BOOLS 'd["other_options"].get("bodylog_default_enabled"), d["other_options"].get("ttft_429_default_enabled"), d.get("adaptive_cc_derived")')"
+[ "$(ro $PLAIN 'd["other_options"].get("ttft_429_default_enabled"), d["other_options"].get("bodylog_default_enabled")')" = "(True, False)" ] && ok "③ unset ttft_429_default_enabled is now an explicit true" || no "③ plain: $(ro $PLAIN 'd["other_options"].get("ttft_429_default_enabled"), d["other_options"].get("bodylog_default_enabled")')"
 
 # ④ init outside [min, max]
 grep -q '\[strs\] adaptive_cc_init_frac=0.1 gives 20, outside \[min 80, max 200\] - effective init is 80' "$PREFIX/logs/error.log" && ok "④ WARN: init_frac below the floor" || no "④ no WARN for init_frac below min"

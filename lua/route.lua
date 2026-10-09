@@ -135,7 +135,7 @@ function _G.register_route(name, opts_factory)
     opts.bodylog_ctl_dict          = opts.bodylog_ctl_dict          or ("bodylog_ctl_"  .. name)
     -- expose_routed_peer:是否把 <ip:port>[/GPU型号] 回显进响应头 X-Routed-Peer。
     -- 默认 false(不外泄内部 peer);仅显式配 true 才开。非布尔值一律按 false 处理。
-    opts.expose_routed_peer        = (opts.expose_routed_peer == true)
+    util.bool_opt(opts, "expose_routed_peer", false, name)
     opts.api_keys_dict             = opts.api_keys_dict             or "api_keys"
     -- 默认 key 表来自 lua/api_keys.lua(唯一来源)—— video 这类不走 lua 引擎的路由
     -- 也读同一张表,密钥不必再写进 ModelRoute / chart values / git。
@@ -154,15 +154,15 @@ function _G.register_route(name, opts_factory)
                 " 非法(需正数)— 回退 ", _G.RT_LIMIT_FACTOR)
         opts.rt_limit_factor = _G.RT_LIMIT_FACTOR
     end
-    if opts.cch_default_enabled        == nil then opts.cch_default_enabled        = _G.CCH_STRIP_DEFAULT_ENABLED end
+    util.bool_opt(opts, "cch_default_enabled", _G.CCH_STRIP_DEFAULT_ENABLED == true, name)
     -- Kimi tool_call_id normalize 每路由默认（factory 显式设 false 即永久关，重启也不恢复；缺省回落全局 _G.KIMI_NORMALIZE_DEFAULT_ENABLED）
-    if opts.kimi_normalize_default_enabled == nil then opts.kimi_normalize_default_enabled = _G.KIMI_NORMALIZE_DEFAULT_ENABLED end
-    if opts.bodylog_default_enabled    == nil then opts.bodylog_default_enabled    = _G.BODYLOG_DEFAULT_ENABLED end
+    util.bool_opt(opts, "kimi_normalize_default_enabled", _G.KIMI_NORMALIZE_DEFAULT_ENABLED == true, name)
+    util.bool_opt(opts, "bodylog_default_enabled", _G.BODYLOG_DEFAULT_ENABLED == true, name)
     opts.bodylog_default_pct       = opts.bodylog_default_pct       or _G.BODYLOG_DEFAULT_PCT
-    if opts.disable_body_user_affinity == nil then opts.disable_body_user_affinity = _G.DISABLE_BODY_USER_AFFINITY end
+    util.bool_opt(opts, "disable_body_user_affinity", _G.DISABLE_BODY_USER_AFFINITY == true, name)
     -- session 亲和性每路由开关:factory 不设(nil)则回落全局 _G.SESSION_AFFINITY_ENABLED。
     -- 显式 false → 本路由忽略所有 sid 走 least_conn;显式 true → 即便全局关本路由仍开粘性。
-    if opts.session_affinity_enabled   == nil then opts.session_affinity_enabled   = _G.SESSION_AFFINITY_ENABLED end
+    util.bool_opt(opts, "session_affinity_enabled", _G.SESSION_AFFINITY_ENABLED == true, name)
     opts.health_check_interval     = opts.health_check_interval     or 10
     opts.health_ban_ttl            = opts.health_ban_ttl            or 300
     opts.health_probe_path         = opts.health_probe_path         or _G.DEFAULT_HEALTH_PROBE_PATH  -- 健康探针 GET 的路径,per-route 可配(后端探测接口不同的路由可覆盖)
@@ -188,6 +188,7 @@ function _G.register_route(name, opts_factory)
     -- <route>[:<model>] 前缀);阈值默认用全局 _G.TTFT_LIMIT_MS。两者都可在 factory 覆盖。
     opts.ttft_dict                 = opts.ttft_dict                 or "ttft_stat"
     opts.ttft_limit_ms             = opts.ttft_limit_ms             or _G.TTFT_LIMIT_MS
+    util.bool_opt(opts, "ttft_429_default_enabled", true, name)   -- nil used to mean on; now a boolean
     opts.ttft_ewma_alpha           = opts.ttft_ewma_alpha           or 0.3
     -- alpha 必须在 [0,1];配错(如把 0.3 写成 30)会算出负/乱 EWMA → 限流静默失效
     if opts.ttft_ewma_alpha < 0 or opts.ttft_ewma_alpha > 1 then
@@ -231,7 +232,7 @@ function _G.register_route(name, opts_factory)
         ngx.log(ngx.ERR, "[", name, "] reject_rules_status=", tostring(opts.reject_rules_status), " 非法(需 400-599)— 回退 429")
         opts.reject_rules_status = 429
     end
-    if opts.reject_rules_default_enabled == nil then opts.reject_rules_default_enabled = _G.REJECT_RULES_DEFAULT_ENABLED end
+    util.bool_opt(opts, "reject_rules_default_enabled", _G.REJECT_RULES_DEFAULT_ENABLED == true, name)
     opts.reject_rules              = reject_rules.validate_reject_rules(name, opts.reject_rules)
     -- ── 自适应并发(AIMD;配 tps_limit_tps 默认开,与 TPS 硬熔断互斥)默认值 ──
     -- adaptive_cc=true 时:复用 TPS EWMA 当反馈信号,每 adaptive_cc_interval 调一次池并发上限——
@@ -242,6 +243,19 @@ function _G.register_route(name, opts_factory)
     -- 显式 adaptive_cc=false → 硬熔断;显式 true → 自适应。两种都没声明 → 保持 nil(无 tps 限流)。
     -- ⚠️ 必须与 tps.tps_dict_if_on 的闸门口径一致:一处认 tps_metrics 另一处不认的话,
     --    「只配 tps_metrics」的路由会走进硬 429 而不是 AIMD,与配了静态阈值的路由行为不一致。
+    -- adaptive_cc: unset follows _G.ADAPTIVE_CC_DEFAULT below, so only a value that is present is parsed.
+    -- A plain truthiness test left the string "off" / "false" meaning on, silently.
+    if opts.adaptive_cc ~= nil then
+        local b = util.parse_bool(opts.adaptive_cc)
+        if b == nil then
+            ngx.log(ngx.ERR, "[", name, "] adaptive_cc=", tostring(opts.adaptive_cc),
+                    " is not a boolean - treated as unset (global default)")
+        elseif type(opts.adaptive_cc) ~= "boolean" then
+            ngx.log(ngx.WARN, "[", name, "] adaptive_cc=", tostring(opts.adaptive_cc), " (", type(opts.adaptive_cc),
+                    ") read as ", tostring(b), "; write it as a boolean")
+        end
+        opts.adaptive_cc = b
+    end
     if opts.adaptive_cc == nil and (opts.tps_limit_tps or opts.tps_metrics) then
         opts.adaptive_cc = _G.ADAPTIVE_CC_DEFAULT and true or nil
     elseif opts.adaptive_cc == false then

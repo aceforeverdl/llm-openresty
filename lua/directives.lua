@@ -14,7 +14,7 @@ local M = {}
 M.DIRECTIVES = {
   { key = "adaptive_cc", label = "Adaptive concurrency", group = "Adaptive concurrency", kind = "boolean",
     fallback = "on",
-    detail = "Turns the AIMD limit on. With it on, the pool limit moves between the floor and the static peer maximum on the measured decode rate (and TTFT); off, a decode rate below the threshold rejects requests outright. On by default whenever a TPS threshold exists, which is always: tps_limit_tps has a default." },
+    detail = "Turns the AIMD limit on. With it on, the pool limit moves between the floor and the static peer maximum on the measured decode rate (and TTFT); off, a decode rate below the threshold rejects requests outright. On by default whenever a TPS threshold exists, which is always: tps_limit_tps has a default. Accepts true/false (also yes/no, on/off, 1/0); anything else is logged and treated as unset." },
   { key = "adaptive_cc_min", label = "Adaptive floor", group = "Adaptive concurrency", kind = "number",
     fallback = "static max x floor fraction", needsAdaptive = true,
     detail = "Absolute floor for the AIMD limit, in requests. Wins over the floor fraction. Must be at least 1; anything less is logged and ignored. Clamped to the static maximum." },
@@ -114,9 +114,9 @@ M.DIRECTIVES = {
 
   { key = "session_affinity_enabled", label = "Session affinity", group = "Routing", kind = "boolean",
     fallback = "off",
-    detail = "On, requests carrying a session id stick to one peer (consistent hash); off, every request goes to the least-loaded peer." },
+    detail = "On, requests carrying a session id stick to one peer (consistent hash); off, every request goes to the least-loaded peer. Accepts true/false (also yes/no, on/off, 1/0); anything else is logged and the default stands." },
   { key = "expose_routed_peer", label = "Expose routed peer", group = "Observability", kind = "boolean",
-    fallback = "off", detail = "On, the response carries an X-Routed-Peer header naming the backend (address and GPU type) that served it." },
+    fallback = "off", detail = "On, the response carries an X-Routed-Peer header naming the backend (address and GPU type) that served it. Accepts true/false (also yes/no, on/off, 1/0); anything else is logged and the default stands." },
   { hidden = true, key = "reject_rules_status", label = "Rejection status", group = "Other", kind = "number",
     fallback = "429", detail = "HTTP status returned when a content rejection rule matches. Each rule can override it." },
   { key = "bodylog_default_pct", label = "Body log sample percent", group = "Observability", kind = "number",
