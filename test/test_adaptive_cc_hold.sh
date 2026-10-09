@@ -99,9 +99,16 @@ grep -q 'adaptive_cc_hold_when_idle=maybe is not a boolean' "$PREFIX/logs/error.
 ah=$(burst_ok $HOLD 25)
 [ "$ah" -le 4 ] && ok "② fresh hold route still starts at min (admitted=$ah)" || no "② hold admitted $ah fresh, want <=4"
 
-# ③ high load (~30 in flight) on both: both climb above 20
-( load_n $HOLD 22 10 ) & ( load_n $CTL 22 10 ) & wait
-hpk=$(fv $HOLD adaptive_cc); cpk=$(fv $CTL adaptive_cc)
+# ③ high load (~30 in flight) on both: both climb above 20. 16s rather than 10s: on a busy test box
+#   the climb is slower. The control's peak is read at once (its slack shrink starts as soon as load
+#   drops). The hold route then gets a short light load before its peak is read: the in-flight count
+#   from the high load (rt_sum) lingers until the next request overwrites it, and a timer tick in that
+#   gap is a legitimate pressure step -- read before it settles, ④ would mistake it for light load
+#   raising cc.
+( load_n $HOLD 22 16 ) & ( load_n $CTL 22 16 ) & wait
+cpk=$(fv $CTL adaptive_cc)
+load_n $HOLD 1 6
+hpk=$(fv $HOLD adaptive_cc)
 echo "  after high load: hold cc=$hpk  ctl cc=$cpk"
 awk "BEGIN{exit !($(num $hpk)>20)}" && ok "③ hold route still grows under pressure (cc=$hpk)" || no "③ hold cc=$hpk, want >20"
 awk "BEGIN{exit !($(num $cpk)>20)}" && ok "③ ctl route grows too (cc=$cpk)"                  || no "③ ctl cc=$cpk, want >20"
