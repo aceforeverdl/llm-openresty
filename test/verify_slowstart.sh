@@ -34,6 +34,7 @@ http {
   init_worker_by_lua_block {
     math.randomseed(ngx.now()*1000 + ngx.worker.pid())
     _G.TPS_BUCKETS = {5,10,20,40,80,150,300}
+    _G.ADAPTIVE_CC_HOLD_WHEN_IDLE = false   -- pinned: these checks predate the hold-when-idle default
     _G.ADAPTIVE_CC_TTL = 30
     local p2big = {{"127.0.0.1",28941,"b1",0,20},{"127.0.0.1",28942,"b2",0,20}}  -- 静态 max=40
     local base = {default_max=50,bodylog_default_enabled=false,health_check_interval=5,

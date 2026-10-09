@@ -37,6 +37,7 @@ http {
   init_worker_by_lua_block {
     math.randomseed(ngx.now()*1000 + ngx.worker.pid())
     _G.TPS_BUCKETS = {5,10,20,40,80,150,300}
+    _G.ADAPTIVE_CC_HOLD_WHEN_IDLE = false   -- pinned: these checks predate the hold-when-idle default
     -- rt route:紧并发闸(rt_limit_factor=1, per-peer max=1 → 静态 max=2),极易触发 concurrency 429
     local p2 = {{"127.0.0.1",28941,"m1",0,1},{"127.0.0.1",28942,"m2",0,1}}
     local base = {default_max=2,bodylog_default_enabled=false,health_check_interval=5}

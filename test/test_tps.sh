@@ -44,6 +44,7 @@ http {
   init_worker_by_lua_block {
     math.randomseed(ngx.now()*1000 + ngx.worker.pid())
     _G.TPS_BUCKETS = {5,10,20,40,80,150,300}   -- 测试用小桶(溢出>300→P20代表=600)
+    _G.ADAPTIVE_CC_HOLD_WHEN_IDLE = false   -- pinned: these checks predate the hold-when-idle default
     -- ⚠️ 显式钉住全局默认下限,别继承 session_base.conf —— 否则生产一改这里就红(AC6 那次的教训)。
     --    值取 20(= 2026-08-25 生产值),TP19 据此验「未配 tps_limit_tps 的路由继承全局默认」。
     _G.TPS_LIMIT_TPS = 20

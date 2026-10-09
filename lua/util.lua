@@ -80,6 +80,45 @@ end
 -- 时 _G.__route_opts[ngx.var.route] 为 nil。content/access phase 的 do_route + 各 dbg_* 统一用它返
 -- JSON 500,避免同一 guard 复制到 ~20 处后漂移(code review G6)。返回 true=opts 缺失(调用方应
 -- return / return ngx.exit(500))。log phase 的 do_log_release、balancer phase 不能 ngx.say,各自保留简单 guard。
+-- M.parse_bool(v) -> true | false | nil
+-- Lua treats every string and every number as true, so a value like "False" or 0 arriving from a
+-- route factory would silently mean "on". Booleans pass through; strings true/1/yes/on and
+-- false/0/no/off (any case, surrounding spaces ignored) and numbers (0 = false) are recognised;
+-- anything else returns nil so the caller can log it and use its own default.
+local TRUE_WORDS  = { ["true"] = true, ["1"] = true, ["yes"] = true, ["on"] = true }
+local FALSE_WORDS = { ["false"] = true, ["0"] = true, ["no"] = true, ["off"] = true }
+function M.parse_bool(v)
+    local t = type(v)
+    if t == "boolean" then return v end
+    if t == "number" then return v ~= 0 end
+    if t == "string" then
+        local w = v:lower():match("^%s*(.-)%s*$")
+        if TRUE_WORDS[w] then return true end
+        if FALSE_WORDS[w] then return false end
+    end
+    return nil
+end
+
+-- M.bool_opt(opts, key, default, route_name) — normalise opts[key] to a boolean in place.
+-- nil -> default (no log); recognised non-boolean -> parsed value with a WARN (so a typo-ish but
+-- unambiguous "False" is honoured and still visible); unrecognised -> default with an ERR.
+function M.bool_opt(opts, key, default, route_name)
+    local v = opts[key]
+    if v == nil then opts[key] = default and true or false; return end
+    local b = M.parse_bool(v)
+    if b == nil then
+        ngx.log(ngx.ERR, "[", route_name or "?", "] ", key, "=", tostring(v),
+                " is not a boolean - using the default ", tostring(default and true or false))
+        opts[key] = default and true or false
+    else
+        if type(v) ~= "boolean" then
+            ngx.log(ngx.WARN, "[", route_name or "?", "] ", key, "=", tostring(v), " (", type(v),
+                    ") read as ", tostring(b), "; write it as a boolean")
+        end
+        opts[key] = b
+    end
+end
+
 function M.opts_missing(opts)
     if opts then return false end
     ngx.status = 500

@@ -63,6 +63,11 @@ function _G.register_route(name, opts_factory)
         _G.__route_failed[name] = true
         return nil
     end
+    -- Keys the route conf set itself, recorded before any default is filled in, so /_route_opts can
+    -- tell a configured value from an engine default.
+    local set_keys = {}
+    for k in pairs(opts) do if type(k) == "string" then set_keys[k] = true end end
+    opts._set_keys = set_keys
     opts.route_name = name
     -- 路由声明的指标表(未配 = nil → 走静态单阈值)。谁写进来的引擎不关心:
     -- 可以是外部工具渲染的,也可以在 conf 里手写 —— 对引擎完全等价。
@@ -164,8 +169,9 @@ function _G.register_route(name, opts_factory)
     opts.cluster_avg_interval      = opts.cluster_avg_interval      or 30
     -- ── 跨层单请求 fallback(默认关)──
     -- cross_tier_fallback:开时高优层 5xx/连接失败即刻兜到低优层代表(不等 health-timer ban)。
-    --   bool 化:任何 truthy → true、缺省/false/nil → false,避免 factory 传字符串 "false" 被当真。
-    opts.cross_tier_fallback = opts.cross_tier_fallback and true or false
+    --   Parsed with util.bool_opt: a plain truthiness test turned "False" / "0" into "on" (any string
+    --   is truthy in Lua). Unset -> false; unrecognised -> false with an ERR.
+    util.bool_opt(opts, "cross_tier_fallback", false, name)
     -- max_more_tries:balancer.set_more_tries 的重试预算上限(需正整数;非法回退 2)。
     local mmt = tonumber(opts.max_more_tries)
     if mmt == nil then
@@ -248,10 +254,14 @@ function _G.register_route(name, opts_factory)
     -- Neither set → init = min (previous behaviour). No global default on purpose.
     opts.adaptive_cc_init          = opts.adaptive_cc_init
     opts.adaptive_cc_init_frac     = opts.adaptive_cc_init_frac
-    -- Optional: hold cc when traffic is low or absent. Skips the slack shrink and writes cc without a
-    -- TTL, so neither a trickle nor a long idle lowers it. Growth (pressure / 429s) and overload shrink
-    -- are unchanged. Off unless set; no global default.
-    opts.adaptive_cc_hold_when_idle = opts.adaptive_cc_hold_when_idle
+    -- Hold cc when traffic is low or absent: skips the slack shrink and writes cc without a TTL, so
+    -- neither a trickle nor a long idle lowers it. Growth (pressure / 429s) and overload shrink are
+    -- unchanged. Default comes from _G.ADAPTIVE_CC_HOLD_WHEN_IDLE (true); a route turns it off with
+    -- adaptive_cc_hold_when_idle = false.
+    util.bool_opt(opts, "adaptive_cc_hold_when_idle", _G.ADAPTIVE_CC_HOLD_WHEN_IDLE == true, name)
+    -- TTFT also judges the AIMD limit unless the route says false. Normalised so the effective value
+    -- is a boolean (it used to stay nil = on) and a string "False" means off rather than truthy-on.
+    util.bool_opt(opts, "adaptive_cc_use_ttft", true, name)
     opts.adaptive_cc_interval      = opts.adaptive_cc_interval      or opts.tps_window  -- AIMD 步长,默认=tps_window
     opts.adaptive_cc_dec           = opts.adaptive_cc_dec           or _G.ADAPTIVE_CC_DEC  -- EWMA<阈值 → ×dec(减)
     opts.adaptive_cc_inc           = opts.adaptive_cc_inc           or _G.ADAPTIVE_CC_INC  -- EWMA>=阈值 → ×inc(增)
@@ -329,12 +339,6 @@ function _G.register_route(name, opts_factory)
                     opts.adaptive_cc_init_frac = nil
                 end
             end
-            -- Must be a real boolean: a string like "yes" would be truthy in Lua and silently turn it on.
-            if opts.adaptive_cc_hold_when_idle ~= nil and type(opts.adaptive_cc_hold_when_idle) ~= "boolean" then
-                ngx.log(ngx.ERR, "[", name, "] adaptive_cc_hold_when_idle=", tostring(opts.adaptive_cc_hold_when_idle),
-                        " is invalid (need true/false) - treated as false")
-                opts.adaptive_cc_hold_when_idle = nil
-            end
         end
     end
     -- M2: dict 存在性检查（防新模型 conf 漏声明 lua_shared_dict 时调试困难）
@@ -345,6 +349,29 @@ function _G.register_route(name, opts_factory)
             ngx.log(ngx.ERR, "[", name, "] register_route: required shared_dict '", dname,
                     "' (for opts.", fld, ") not declared — add `lua_shared_dict ", dname,
                     " <size>;` to this route's conf and reload")
+        end
+    end
+    -- init is clamped into [min, static max] every time it is used, silently (min and max move with the
+    -- peer list, so it cannot be rejected up front). Say once, at registration, when the configured value
+    -- does not fit the pool as it is now -- otherwise a too-small init_frac is quietly the same as min.
+    if opts.adaptive_cc and (opts.adaptive_cc_init or opts.adaptive_cc_init_frac) then
+        local models = {}
+        if opts.peers_by_model then for m in pairs(opts.peers_by_model) do models[#models + 1] = m end
+        else models[1] = false end
+        for _, m in ipairs(models) do
+            local maxcc = M.compute_static_max_cc(opts, m)
+            if maxcc > 0 then
+                local mincc = M.derive_mincc(opts, maxcc)
+                local raw = opts.adaptive_cc_init
+                    or math.max(1, math.floor(maxcc * opts.adaptive_cc_init_frac))
+                if raw < mincc or raw > maxcc then
+                    local eff = M.derive_initcc(opts, maxcc, mincc)
+                    ngx.log(ngx.WARN, "[", name, "]", m and (" model " .. m) or "", " adaptive_cc_init",
+                            opts.adaptive_cc_init and "" or "_frac", "=",
+                            tostring(opts.adaptive_cc_init or opts.adaptive_cc_init_frac), " gives ", raw,
+                            ", outside [min ", mincc, ", max ", maxcc, "] - effective init is ", eff)
+                end
+            end
         end
     end
     _G.__route_opts[name] = opts

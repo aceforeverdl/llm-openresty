@@ -44,6 +44,7 @@ cat <<'EOF'
   init_worker_by_lua_block {
     math.randomseed(ngx.now()*1000 + ngx.worker.pid())
     _G.TPS_BUCKETS = {5,10,20,40,80,150,300}
+    _G.ADAPTIVE_CC_HOLD_WHEN_IDLE = false   -- pinned: these checks predate the hold-when-idle default
     _G.ADAPTIVE_CC_MIN_FRAC = 0.4   -- pinned: only explicit adaptive_cc_min=2 is used below
     -- static max = 2 peers x 100 = 200, min = 2, ABS = 0 so only the relative gates and init matter.
     -- Short cc TTL (6s) + tps_ttl 8s so the expiry check (⑥) fits in the run.
@@ -55,7 +56,7 @@ cat <<'EOF'
     local function R(x) local t={} for k,v in pairs(base) do t[k]=v end for k,v in pairs(x) do t[k]=v end return t end
     _G.register_route("hold", function() return R({adaptive_cc_hold_when_idle=true}) end)
     _G.register_route("ctl",  function() return R({}) end)                                -- control: switch off
-    _G.register_route("hbad", function() return R({adaptive_cc_hold_when_idle="yes"}) end)  -- invalid → off
+    _G.register_route("hbad", function() return R({adaptive_cc_hold_when_idle="maybe"}) end)  -- unrecognised → global default (pinned false above)
   }
 EOF
 port=19750
@@ -91,8 +92,8 @@ echo "########## adaptive_cc_hold_when_idle ##########"
 # ①
 [ "$(fv $HOLD adaptive_cc_hold_when_idle)" = "True" ]  && ok "① hold route reports the switch on"  || no "① hold route: $(fv $HOLD adaptive_cc_hold_when_idle)"
 [ "$(fv $CTL adaptive_cc_hold_when_idle)" = "False" ]  && ok "① ctl route reports the switch off"  || no "① ctl route: $(fv $CTL adaptive_cc_hold_when_idle)"
-[ "$(fv $HBAD adaptive_cc_hold_when_idle)" = "False" ] && ok "① invalid string treated as off"     || no "① hbad route: $(fv $HBAD adaptive_cc_hold_when_idle)"
-grep -q 'adaptive_cc_hold_when_idle=yes is invalid' "$PREFIX/logs/error.log" && ok "① invalid value logged" || no "① invalid value not logged"
+[ "$(fv $HBAD adaptive_cc_hold_when_idle)" = "False" ] && ok "① unrecognised string falls back to the default (off)"     || no "① hbad route: $(fv $HBAD adaptive_cc_hold_when_idle)"
+grep -q 'adaptive_cc_hold_when_idle=maybe is not a boolean' "$PREFIX/logs/error.log" && ok "① invalid value logged" || no "① invalid value not logged"
 
 # ② fresh pool: hold does not change the start point (min = 2)
 ah=$(burst_ok $HOLD 25)

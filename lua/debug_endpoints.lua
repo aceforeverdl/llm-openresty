@@ -795,6 +795,65 @@ function _G.dbg_cch_test(opts)
     ngx.say(cjson_dbg.encode(out))
 end
 
+-- GET /_route_opts — what the engine actually runs this route with.
+--   directives: the tunable options, in the console deploy form's shape (lua/directives.lua) plus
+--               value (effective, after defaults and validation) and set (the route conf set it).
+--   other_options: remaining scalar options, not in the catalog (dict names, toggles' defaults ...).
+--   adaptive_cc_derived: per sub-pool static max / floor / start point, as the timer computes them.
+-- Values whose key looks secret are redacted. 127.0.0.1 only (see router_locations.inc).
+local directives = require "directives"
+local function looks_secret(k)
+    k = k:lower()
+    return k:find("key", 1, true) or k:find("token", 1, true) or k:find("secret", 1, true)
+        or k:find("password", 1, true) or k:find("auth", 1, true)
+end
+function _G.dbg_route_opts(opts)
+    if util.opts_missing(opts) then return end
+    ngx.header["Content-Type"] = "application/json"
+    local set_keys = opts._set_keys or {}
+    local in_catalog = {}
+    local list = {}
+    for _, d in ipairs(directives.DIRECTIVES) do
+        in_catalog[d.key] = true
+        local v = opts[d.key]
+        if d.key == "adaptive_cc" then v = opts.adaptive_cc and true or false end   -- off is stored as nil
+        local item = { key = d.key, label = d.label, group = d.group, kind = d.kind, fallback = d.fallback,
+                       detail = d.detail, needsAdaptive = d.needsAdaptive or false,
+                       set = set_keys[d.key] == true }
+        if v == nil then item.value = cjson_dbg.null else item.value = v end
+        list[#list + 1] = item
+    end
+    local other = {}
+    for k, v in pairs(opts) do
+        local t = type(v)
+        if type(k) == "string" and not in_catalog[k] and k:sub(1, 1) ~= "_"
+           and (t == "string" or t == "number" or t == "boolean") then
+            other[k] = (looks_secret(k) and t ~= "boolean") and "<redacted>" or v
+        end
+    end
+    local derived
+    if opts.adaptive_cc then
+        derived = {}
+        local function fill(mkey, model)
+            local maxcc = route.compute_static_max_cc(opts, model)
+            local mincc = route.derive_mincc(opts, maxcc)
+            derived[mkey] = { static_max = maxcc, min = mincc, init = route.derive_initcc(opts, maxcc, mincc) }
+        end
+        if opts.peers_by_model then
+            for m in pairs(opts.peers_by_model) do fill(m, m) end
+        else
+            fill("_", false)
+        end
+    end
+    local peers = { count = opts.peers and #opts.peers or 0 }
+    if opts.peers_by_model then
+        peers.by_model = {}
+        for m, l in pairs(opts.peers_by_model) do peers.by_model[m] = #l end
+    end
+    ngx.say(cjson_dbg.encode({ route = opts.route_name, directives = list, other_options = other,
+                               peers = peers, adaptive_cc_derived = derived }))
+end
+
 function _G.dbg_route_state(opts)
     -- H1: nil opts 防御
     if util.opts_missing(opts) then return end

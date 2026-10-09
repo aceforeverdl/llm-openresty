@@ -36,6 +36,7 @@ http {
   init_worker_by_lua_block {
     math.randomseed(ngx.now()*1000 + ngx.worker.pid())
     _G.ADAPTIVE_CC_TTL = 60
+    _G.ADAPTIVE_CC_HOLD_WHEN_IDLE = false   -- pinned: these checks predate the hold-when-idle default
     -- 静态 max = 200+200 = 400;min=5;阈值 tps=30;ttft_limit=500ms;interval=1s,inc=1.5/dec=0.7 加速收敛便于测
     local mk = function() return {
       peers = {{"127.0.0.1",28961,"m1",0,200},{"127.0.0.1",28962,"m2",0,200}},

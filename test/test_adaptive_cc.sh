@@ -41,6 +41,7 @@ http {
   init_worker_by_lua_block {
     math.randomseed(ngx.now()*1000 + ngx.worker.pid())
     _G.TPS_BUCKETS = {5,10,20,40,80,150,300}
+    _G.ADAPTIVE_CC_HOLD_WHEN_IDLE = false   -- pinned: these checks predate the hold-when-idle default
     _G.ADAPTIVE_CC_TTL = 16   -- 测试用小 TTL(生产默认 300);AC5 自愈快速触发。expire(10s)<16 → cc 保持
     -- ⚠️ 显式钉住派生系数(AC6 用):不钉的话会继承 session_base.conf 的当前值,生产一改测试就红。
     --    这里取 0.4(= 2026-08 生产值);只有 AC6 的 acd 路由依赖派生 min,别的路由都显式配了 adaptive_cc_min。

@@ -32,6 +32,7 @@ http {
   init_worker_by_lua_block {
     math.randomseed(ngx.now()*1000 + ngx.worker.pid())
     _G.TPS_BUCKETS = {5,10,20,40,80,150,300}; _G.TTFT_BUCKETS_MS = {50,100,200,300,500,800,1200}
+    _G.ADAPTIVE_CC_HOLD_WHEN_IDLE = false   -- pinned: these checks predate the hold-when-idle default
     -- 路径路由 里注册照旧靠 per-model server 的 set_by_lua;这里图省事直接 init_worker 注册 glm(注册机制无关本次验证)
     _G.register_route("glm", function() return {
       peers = {{"127.0.0.1",28941,"g1"},{"127.0.0.1",28942,"g2"}},
