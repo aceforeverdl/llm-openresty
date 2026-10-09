@@ -796,8 +796,9 @@ function _G.dbg_cch_test(opts)
 end
 
 -- GET /_route_opts — what the engine actually runs this route with.
---   directives: the tunable options, in the console deploy form's shape (lua/directives.lua) plus
---               value (effective, after defaults and validation) and set (the route conf set it).
+--   directives: the options an operator tunes, in the console deploy form's shape (lua/directives.lua)
+--               plus value (effective, after defaults and validation) and set (the route conf set it).
+--   advanced:   same shape, for engine internals the form does not offer (hidden in the catalog).
 --   other_options: remaining scalar options, not in the catalog (dict names, toggles' defaults ...).
 --   adaptive_cc_derived: per sub-pool static max / floor / start point, as the timer computes them.
 -- Values whose key looks secret are redacted and peer lists reduced to counts, which is what lets it be
@@ -813,7 +814,7 @@ function _G.dbg_route_opts(opts)
     ngx.header["Content-Type"] = "application/json"
     local set_keys = opts._set_keys or {}
     local in_catalog = {}
-    local list = {}
+    local list, advanced = {}, {}
     for _, d in ipairs(directives.DIRECTIVES) do
         in_catalog[d.key] = true
         local v = opts[d.key]
@@ -822,7 +823,7 @@ function _G.dbg_route_opts(opts)
                        detail = d.detail, needsAdaptive = d.needsAdaptive or false,
                        set = set_keys[d.key] == true }
         if v == nil then item.value = cjson_dbg.null else item.value = v end
-        list[#list + 1] = item
+        if d.hidden then advanced[#advanced + 1] = item else list[#list + 1] = item end
     end
     local other = {}
     for k, v in pairs(opts) do
@@ -851,7 +852,7 @@ function _G.dbg_route_opts(opts)
         peers.by_model = {}
         for m, l in pairs(opts.peers_by_model) do peers.by_model[m] = #l end
     end
-    ngx.say(cjson_dbg.encode({ route = opts.route_name, directives = list, other_options = other,
+    ngx.say(cjson_dbg.encode({ route = opts.route_name, directives = list, advanced = advanced, other_options = other,
                                peers = peers, adaptive_cc_derived = derived }))
 end
 

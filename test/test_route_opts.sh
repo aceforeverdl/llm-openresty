@@ -84,14 +84,14 @@ burst_ok(){ local u=$1 n=$2 d="$PREFIX/burst_$RANDOM"; mkdir -p "$d"
 fv(){ curl -s "$1/_tps_status" | python3 -c "import sys,json;d=json.load(sys.stdin);v=d.get('$2');print(v.get('_') if isinstance(v,dict) else v)"; }
 num(){ [ "$1" = "None" ] && echo -1 || echo "$1"; }
 
-# ro <url> <python expr over d (decoded /_route_opts) and D (directives by key)>
-ro(){ curl -s "$1/_route_opts" | python3 -c "import sys,json;d=json.load(sys.stdin);D={x['key']:x for x in d['directives']};r=($2);print(r if isinstance(r,tuple) else r)"; }
+# ro <url> <python expr over d (decoded /_route_opts) and D (directives + advanced, by key)>
+ro(){ curl -s "$1/_route_opts" | python3 -c "import sys,json;d=json.load(sys.stdin);D={x['key']:x for x in d['directives']+d['advanced']};r=($2);print(r if isinstance(r,tuple) else r)"; }
 echo "########## /_route_opts ##########"
 # ① literal catalog defaults == effective values on a route that sets nothing
 drift=$(curl -s "$PLAIN/_route_opts" | python3 -c '
 import sys, json
 d = json.load(sys.stdin); bad = []; checked = 0
-for x in d["directives"]:
+for x in d["directives"] + d["advanced"]:
     f, v = x["fallback"], x["value"]
     if f in ("on", "off"): want = (f == "on")
     elif f.startswith("/"): want = f
@@ -104,8 +104,10 @@ for x in d["directives"]:
 print(checked, "|", "; ".join(bad))')
 n=${drift%% |*}; rest=${drift#*| }
 [ "$n" -ge 25 ] && [ -z "$rest" ] && ok "① $n literal catalog defaults match the engine" || no "① checked=$n drift: $rest"
-[ "$(ro $PLAIN 'len(d["directives"])')" -ge 38 ] && ok "① catalog served ($(ro $PLAIN 'len(d["directives"])') directives, console shape)" || no "① directives missing"
-[ "$(ro $PLAIN 'sorted(set(k for x in d["directives"] for k in x))')" = "['detail', 'fallback', 'group', 'key', 'kind', 'label', 'needsAdaptive', 'set', 'value']" ] && ok "① item fields match the console Directive (+value, set)" || no "① fields: $(ro $PLAIN 'sorted(set(k for x in d["directives"] for k in x))')"
+[ "$(ro $PLAIN 'len(d["directives"]), len(d["advanced"])')" = "(16, 24)" ] && ok "① catalog served: 16 operator directives + 24 advanced" || no "① counts: $(ro $PLAIN 'len(d["directives"]), len(d["advanced"])')"
+[ "$(ro $PLAIN 'sorted({x["group"] for x in d["directives"]})')" = "['Adaptive concurrency', 'Capacity & failover', 'Observability', 'Routing', 'Thresholds']" ] && ok "① operator groups" || no "① groups: $(ro $PLAIN 'sorted({x["group"] for x in d["directives"]})')"
+[ "$(ro $PLAIN '"adaptive_cc_inc" in {x["key"] for x in d["advanced"]} and "adaptive_cc_inc" not in {x["key"] for x in d["directives"]}')" = "True" ] && ok "① internals listed under advanced, not directives" || no "① adaptive_cc_inc misplaced"
+[ "$(ro $PLAIN 'sorted(set(k for x in d["directives"]+d["advanced"] for k in x))')" = "['detail', 'fallback', 'group', 'key', 'kind', 'label', 'needsAdaptive', 'set', 'value']" ] && ok "① item fields match the console Directive (+value, set)" || no "① fields: $(ro $PLAIN 'sorted(set(k for x in d["directives"]+d["advanced"] for k in x))')"
 
 # ② new defaults
 [ "$(ro $PLAIN 'D["adaptive_cc_hold_when_idle"]["value"], D["adaptive_cc_hold_when_idle"]["set"]')" = "(True, False)" ] && ok "② hold_when_idle defaults to on (not set by the route)" || no "② hold: $(ro $PLAIN 'D["adaptive_cc_hold_when_idle"]')"
