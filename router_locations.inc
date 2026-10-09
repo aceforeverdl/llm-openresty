@@ -152,9 +152,9 @@
     location = /_route_state {
         content_by_lua_block { _G.dbg_route_state(_G.__route_opts[ngx.var.route]) }
     }
-    # /_route_opts — effective options after defaults/validation + derived adaptive_cc bounds (local only)
+    # /_route_opts — effective options after defaults/validation + derived adaptive_cc bounds. Read-only and
+    # open like /_tps_status: secret-looking values are redacted and peers are reduced to counts.
     location = /_route_opts {
-        allow 127.0.0.1; deny all;
         content_by_lua_block { _G.dbg_route_opts(_G.__route_opts[ngx.var.route]) }
     }
     location = /_ttft_status {

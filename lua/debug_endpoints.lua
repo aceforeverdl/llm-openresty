@@ -800,7 +800,8 @@ end
 --               value (effective, after defaults and validation) and set (the route conf set it).
 --   other_options: remaining scalar options, not in the catalog (dict names, toggles' defaults ...).
 --   adaptive_cc_derived: per sub-pool static max / floor / start point, as the timer computes them.
--- Values whose key looks secret are redacted. 127.0.0.1 only (see router_locations.inc).
+-- Values whose key looks secret are redacted and peer lists reduced to counts, which is what lets it be
+-- open like the other read-only status endpoints (the console reads the catalog from it).
 local directives = require "directives"
 local function looks_secret(k)
     k = k:lower()

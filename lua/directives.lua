@@ -2,7 +2,7 @@
 -- console's deploy form (modelsphere/console web/src/modules/swiss/lib/routeDirectives.ts):
 --   key, label, group, kind ("number" | "boolean" | "text"), fallback (the engine default, as text),
 --   detail, needsAdaptive (only meaningful while adaptive concurrency is on).
--- /_route_opts serves it with each option's effective value, so the form can read the catalog from
+-- /_route_opts (open, read-only) serves it with each option's effective value, so the form can read the catalog from
 -- the engine instead of keeping its own copy. Defaults here must match lua/route.lua and
 -- session_base.conf; "fallback" describes the engine default -- autoconfig may set some keys on its
 -- own (noted in detail), which the effective value in /_route_opts shows.

@@ -200,7 +200,7 @@ apart. Alert on `api_keys_configured: false`.
 Every `/v1/*` response carries `X-Routed-Session`, `X-Routed-Source`, `X-Routed-Mode`
 (`hash` / `least_conn` / `hash_fallback`), `X-Routed-Peer`, and `X-Routed-Retries`.
 
-`/_route_opts` (127.0.0.1) lists the route's tunable options -- key, label, group, kind,
+`/_route_opts` (read-only, open like `/_tps_status`) lists the route's tunable options -- key, label, group, kind,
 default, description, in the same shape as the console's deploy form -- with the value the
 engine actually runs with and whether the route set it, plus the derived adaptive-concurrency
 bounds (static max, floor, start point) per sub-pool. The catalog lives in `lua/directives.lua`;
@@ -209,7 +209,7 @@ bounds (static max, floor, start point) per sub-pool. The catalog lives in `lua/
 Read-only endpoints (no key required): `/_health_status`, `/_active_conns`,
 `/_cluster_avg`, `/_route_state`, `/_route_debug?sid=…`, `/_route_inspect`,
 `/_ttft_status`, `/_tps_status`, `/_429_status`, `/_bodylog_status`,
-`/_reject_rules_status`.
+`/_reject_rules_status`, `/_route_opts`.
 
 Hot toggles (bound to 127.0.0.1) change behaviour without a reload:
 `/_ttft_toggle`, `/_ttft_limit`, `/_tps_toggle`, `/_tps_limit`, `/_bodylog_toggle`,
