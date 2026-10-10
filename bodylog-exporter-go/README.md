@@ -184,6 +184,8 @@ route 动态发现自监控与富化**同一个发现器**,见上方 `bodylog_ro
 | `ROUTE_DISCOVERY_INTERVAL_SECONDS` | `30` | list ModelRoute 周期(富化 + poll 发现共用) |
 | `ROUTE_DISCOVERY_TIMEOUT_MS` | `4000` | 单次 list/EndpointSlice 请求超时 |
 | `OPENRESTY_SERVICE` | 空 | 只把 `nginx.service` 指向本 openresty 的 route 计入 **poll 列表**(多 openresty 时用);空=全要。**富化映射/service map 不受此过滤**(全 route) |
+| `OPENRESTY_POLL_PER_SERVICE` | `true` | Poll each ModelRoute on the openresty its `spec.nginx.service` names (`ns/name`, or `name` in the ModelRoute's namespace) at `http://<name>.<ns>.svc:<OPENRESTY_POLL_PORT>`, and label the result with that ModelRoute's service. ModelRoutes that name no openresty use `OPENRESTY_POLL_URL`. `false` = the old single-openresty behaviour, where ModelRoutes sharing a route name on different openrestys (a canary next to production) all read the one openresty and got one route's label. |
+| `OPENRESTY_POLL_PORT` | `8080` | Dispatch port of the openresty Services polled per ModelRoute |
 
 发现自监控:`bodylog_route_resolver_up`(1/0)、`bodylog_route_resolver_routes`(route 数)、`bodylog_route_resolver_pods`(映射覆盖 pod 数)、`bodylog_route_resolver_errors_total`。apiserver 抖动某轮失败 → **保留上次成功的映射/routes 不清空**。RBAC 需 `list` `modelroutes`(发现)+ `endpointslices`(富化查后端 pod)。
 

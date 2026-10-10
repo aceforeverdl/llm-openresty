@@ -16,10 +16,10 @@ func TestBackendIP(t *testing.T) {
 	cases := map[string]string{
 		"10.0.0.5:8050":           "10.0.0.5",
 		"10.0.0.5:8050 (retry#1)": "10.0.0.5",
-		"10.102.29.46:8071":            "10.102.29.46",
-		"  10.0.0.5:8050  ":         "10.0.0.5",
-		"(none)":                       "(none)",
-		"":                             "",
+		"10.102.29.46:8071":       "10.102.29.46",
+		"  10.0.0.5:8050  ":       "10.0.0.5",
+		"(none)":                  "(none)",
+		"":                        "",
 	}
 	for in, want := range cases {
 		if got := backendIP(in); got != want {
@@ -44,11 +44,11 @@ func TestSplitNsName(t *testing.T) {
 
 func TestNormalizeServiceLabel(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"kimi/kimi-k25-leader", "kimi/kimi-k25"},                                  // LWS leader → 逻辑服务名
+		{"kimi/kimi-k25-leader", "kimi/kimi-k25"},                                              // LWS leader → 逻辑服务名
 		{"model-service/fallback-model-service-01", "model-service/fallback-model-service-01"}, // 非 LWS,原样
-		{"kimi-k25-leader", "kimi-k25"},                                            // 无 ns 也剥
-		{"kimi/kimi-k25", "kimi/kimi-k25"},                                         // 已无后缀,不动
-		{"foo-leader/bar", "foo-leader/bar"},                                       // "-leader" 在 ns 段(结尾是 bar)→ 不误剥
+		{"kimi-k25-leader", "kimi-k25"},                                                        // 无 ns 也剥
+		{"kimi/kimi-k25", "kimi/kimi-k25"},                                                     // 已无后缀,不动
+		{"foo-leader/bar", "foo-leader/bar"},                                                   // "-leader" 在 ns 段(结尾是 bar)→ 不误剥
 	}
 	for _, c := range cases {
 		if got := normalizeServiceLabel(c.in); got != c.want {
@@ -82,7 +82,7 @@ func newTestResolver(t *testing.T, srv *httptest.Server) *podRouteResolver {
 	r := newPodRouteResolver(prometheus.NewRegistry())
 	r.apiBase = srv.URL
 	r.client = srv.Client()
-	r.tokenPath = "/nonexistent-token" // mock 不校验
+	r.tokenPath = "/nonexistent-token"             // mock 不校验
 	r.groups = []string{"routing.modelsphere.dev"} // single group; the two-group cases set it themselves
 	return r
 }
@@ -593,5 +593,54 @@ func TestResolverTwoGroupsFailureKeepsLast(t *testing.T) {
 	}
 	if up := testutil.ToFloat64(r.up); up != 0 {
 		t.Errorf("no group served: resolver_up = %v, want 0", up)
+	}
+}
+
+// Same route name on three openrestys (production kimi-k3 next to two canaries): one target each, on the
+// openresty its ModelRoute names, labelled with its own service. "name" without a namespace resolves in
+// the ModelRoute's namespace; no nginx.service falls back to OPENRESTY_POLL_URL (base "").
+func TestResolverTargetsPerOpenresty(t *testing.T) {
+	const mr = `{"items":[
+	  {"metadata":{"name":"kimi-k3","namespace":"kimi-k3"},
+	   "spec":{"nginx":{"route":"kimi-k3","service":"llm-route/openresty"},"discovery":{"service":"kimi-k3/kimi-k3"}}},
+	  {"metadata":{"name":"k3-canary-baseline","namespace":"test-kimi-k3"},
+	   "spec":{"nginx":{"route":"kimi-k3","service":"k3-canary-openresty-baseline"},"discovery":{"service":"test-kimi-k3/k3-canary-baseline"}}},
+	  {"metadata":{"name":"k3-canary-experiment","namespace":"test-kimi-k3"},
+	   "spec":{"nginx":{"route":"kimi-k3","service":"test-kimi-k3/k3-canary-openresty-experiment"},"discovery":{"service":"test-kimi-k3/k3-canary-experiment"}}},
+	  {"metadata":{"name":"legacy","namespace":"x"},
+	   "spec":{"nginx":{"route":"legacy"},"discovery":{"service":"x/legacy"}}}
+	]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "endpointslices") {
+			_, _ = w.Write([]byte(esJSON()))
+			return
+		}
+		_, _ = w.Write([]byte(mr))
+	}))
+	defer srv.Close()
+
+	r := newTestResolver(t, srv)
+	r.perService, r.pollPort = true, 8080
+	r.refresh(context.Background())
+	got := map[string]string{}
+	for _, tg := range r.getTargets() {
+		got[tg.base+" "+tg.route] = tg.service
+	}
+	want := map[string]string{
+		"http://openresty.llm-route.svc:8080 kimi-k3":                         "kimi-k3/kimi-k3",
+		"http://k3-canary-openresty-baseline.test-kimi-k3.svc:8080 kimi-k3":   "test-kimi-k3/k3-canary-baseline",
+		"http://k3-canary-openresty-experiment.test-kimi-k3.svc:8080 kimi-k3": "test-kimi-k3/k3-canary-experiment",
+		" legacy": "x/legacy",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("targets =\n%v\nwant\n%v", got, want)
+	}
+
+	// Per-service polling off: everything goes to OPENRESTY_POLL_URL, one target per (base, route) --
+	// the same-named routes collapse to one, as before this change.
+	r.perService = false
+	r.refresh(context.Background())
+	if n := len(r.getTargets()); n != 2 {
+		t.Errorf("perService=false: %d targets, want 2 (kimi-k3 once + legacy): %v", n, r.getTargets())
 	}
 }

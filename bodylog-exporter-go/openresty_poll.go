@@ -120,9 +120,9 @@ func newORMetrics(reg *prometheus.Registry) *orMetrics {
 			Name: "openresty_rejected_total", Help: "429 限流累计(按 service × route × reason=concurrency/ttft/tps)",
 		}, []string{"service", "route", "reason"}),
 
-		pollUp:     g("openresty_poll_up", "上轮 openresty poll 该 route 是否成功(1/0)", "route"),
+		pollUp:     g("openresty_poll_up", "上轮 openresty poll 该 route 是否成功(1/0)", "service", "route"),
 		pollErrors: prometheus.NewCounter(prometheus.CounterOpts{Name: "openresty_poll_errors_total", Help: "openresty poll 出错累计"}),
-		pollLastOK: g("openresty_poll_last_success_seconds", "该 route 上次成功 poll 的 unix 秒", "route"),
+		pollLastOK: g("openresty_poll_last_success_seconds", "该 route 上次成功 poll 的 unix 秒", "service", "route"),
 	}
 	m.resettable = []*prometheus.GaugeVec{
 		// pollUp 要进来:route 下线后不该留一条恒 0 的平线触发告警。
@@ -188,34 +188,39 @@ type rejectStatusResp struct {
 // ---- poller ----
 
 type orPoller struct {
-	cfg      orConfig
-	m        *orMetrics
-	client   *http.Client
-	routesFn func() []string     // 当前要 poll 的 route 集合(静态或 k8s 动态发现)
-	svcFn    func(string) string // route → discovery.service(ns/name);nil 或返回 "" → service=unknown
-	prev     map[string]float64  // 429 counter delta 追踪:key="route|reason" → 上次绝对值
+	cfg       orConfig
+	m         *orMetrics
+	client    *http.Client
+	targetsFn func() []pollTarget // what to poll: (openresty, route, service); base "" = cfg.baseURL
+	prev      map[string]float64  // 429 counter delta tracking: key "base|route|reason" -> last absolute value
 }
 
+func newORPollerTargets(cfg orConfig, m *orMetrics, targetsFn func() []pollTarget) *orPoller {
+	return &orPoller{cfg: cfg, m: m, client: &http.Client{Timeout: cfg.timeout}, targetsFn: targetsFn, prev: map[string]float64{}}
+}
+
+// newORPoller: routes on the single OPENRESTY_POLL_URL, labelled by svcFn (nil or "" -> unknown). Used for
+// static OPENRESTY_POLL_ROUTES and kept for callers that only know route names.
 func newORPoller(cfg orConfig, m *orMetrics, routesFn func() []string, svcFn func(string) string) *orPoller {
-	return &orPoller{
-		cfg:      cfg,
-		m:        m,
-		client:   &http.Client{Timeout: cfg.timeout},
-		routesFn: routesFn,
-		svcFn:    svcFn,
-		prev:     map[string]float64{},
-	}
+	return newORPollerTargets(cfg, m, func() []pollTarget {
+		rs := routesFn()
+		out := make([]pollTarget, 0, len(rs))
+		for _, r := range rs {
+			svc := ""
+			if svcFn != nil {
+				svc = svcFn(r)
+			}
+			out = append(out, pollTarget{route: r, service: svc})
+		}
+		return out
+	})
 }
 
-// serviceOf:route → service label 值。svcFn 缺省或未知 → "unknown"(与 bodylog_* 对齐)。
-func (p *orPoller) serviceOf(route string) string {
-	if p.svcFn == nil {
-		return "unknown"
+func (p *orPoller) baseOf(t pollTarget) string {
+	if t.base != "" {
+		return t.base
 	}
-	if s := p.svcFn(route); s != "" {
-		return s
-	}
-	return "unknown"
+	return p.cfg.baseURL
 }
 
 func (p *orPoller) run(ctx context.Context) {
@@ -237,18 +242,27 @@ func (p *orPoller) pollOnce(ctx context.Context) {
 	for _, gv := range p.m.resettable {
 		gv.Reset()
 	}
-	routes := p.routesFn() // 动态:route 增删自动跟随(下线的 route gauge 因上面 Reset 消失)
-	ok := true             // 仅用于全局端点(/_reject_stats 等)的成败
-	routeOK := map[string]bool{}
-	for _, r := range routes {
-		routeOK[r] = true
+	targets := p.targetsFn() // 动态:route 增删自动跟随(下线的 route gauge 因上面 Reset 消失)
+	for i := range targets {
+		if targets[i].service == "" {
+			targets[i].service = "unknown" // 与 bodylog_* 对齐
+		}
+	}
+	type tkey struct{ base, route string }
+	targetOK := map[tkey]bool{}
+	for _, t := range targets {
+		targetOK[tkey{p.baseOf(t), t.route}] = true
+	}
+	fail := func(t pollTarget, what string, err error) {
+		p.pollErr(what, t.route, err)
+		targetOK[tkey{p.baseOf(t), t.route}] = false
 	}
 
-	for _, route := range routes {
-		service := p.serviceOf(route)
+	for _, t := range targets {
+		base, service, route := p.baseOf(t), t.service, t.route
 		var rs routeStateResp
-		if err := p.getJSON(ctx, "/"+route+"/_route_state", &rs); err != nil {
-			p.pollErrRoute(routeOK, "route_state", route, err)
+		if err := p.getJSON(ctx, base, "/"+route+"/_route_state", &rs); err != nil {
+			fail(t, "route_state", err)
 		} else {
 			p.m.activeLevel.WithLabelValues(service, route).Set(rs.ActiveLevel)
 			p.m.activeLimit.WithLabelValues(service, route).Set(rs.Limit)
@@ -264,8 +278,8 @@ func (p *orPoller) pollOnce(ctx context.Context) {
 		}
 
 		var ts tpsStatusResp
-		if err := p.getJSON(ctx, "/"+route+"/_tps_status", &ts); err != nil {
-			p.pollErrRoute(routeOK, "tps_status", route, err)
+		if err := p.getJSON(ctx, base, "/"+route+"/_tps_status", &ts); err != nil {
+			fail(t, "tps_status", err)
 		} else {
 			p.m.tpsActive.WithLabelValues(service, route).Set(b2f(ts.Active))
 			setModelMap(p.m.tpsEwma, service, route, ts.EwmaTps)
@@ -278,88 +292,108 @@ func (p *orPoller) pollOnce(ctx context.Context) {
 		}
 
 		var tt ttftStatusResp
-		if err := p.getJSON(ctx, "/"+route+"/_ttft_status", &tt); err != nil {
-			p.pollErrRoute(routeOK, "ttft_status", route, err)
+		if err := p.getJSON(ctx, base, "/"+route+"/_ttft_status", &tt); err != nil {
+			fail(t, "ttft_status", err)
 		} else {
 			p.m.ttftActive.WithLabelValues(service, route).Set(b2f(tt.Active))
 			setModelMap(p.m.ttftEwma, service, route, tt.EwmaMs)
 		}
 	}
 
-	// 429 是全局聚合(reject_stat 全局 dict),用任一 route 路径 + ?all=1 拉一次即可。
-	if len(routes) > 0 {
+	// 429 is aggregated per openresty (reject_stat is one dict per openresty), so pull it once per
+	// distinct openresty through any of its routes (?all=1), and attribute each by_route entry to the
+	// target on THAT openresty -- a route name alone is ambiguous across openrestys.
+	var bases []string
+	firstRoute := map[string]string{}
+	svcOn := map[tkey]string{}
+	for _, t := range targets {
+		b := p.baseOf(t)
+		if _, ok := firstRoute[b]; !ok {
+			firstRoute[b] = t.route
+			bases = append(bases, b)
+		}
+		svcOn[tkey{b, t.route}] = t.service
+	}
+	rejOK := map[string]bool{}
+	for _, base := range bases {
 		var rj rejectStatusResp
-		if err := p.getJSON(ctx, "/"+routes[0]+"/_429_status?all=1", &rj); err != nil {
+		if err := p.getJSON(ctx, base, "/"+firstRoute[base]+"/_429_status?all=1", &rj); err != nil {
 			p.pollErr("429_status", "*", err)
-			ok = false
-		} else {
-			// ⚠️ 先把「当前所有 route x 所有 reason」的 series 预初始化成 0。
-			//
-			// 不这么做的话:counter 在第一次 Add 之前【不存在】,而 openresty 只在真发生 429 时
-			// 才往 by_route 里放条目 —— 于是「一次 429 都没有」表现为【空 vector】,与「采集断了」
-			// 完全无法区分(实测 2026-08-31:openresty 重建后 by_route={},该指标整个消失)。
-			// 空 vector 的后果比"值为 0"严重得多:
-			//   - sum()/rate() 套上去仍是空,**不会**变成 0;
-			//   - 基于它的告警表达式返回空 → 永远不触发(不是判为 0 不告警,是根本没值可判);
-			//   - 面板空白,看起来像监控挂了。
-			// 对照:同一次 poll 的 adaptive_cc_rej 是 gauge、每轮 Set(0),所以恒有 series。
-			//
-			// 放在每轮而不是启动时一次:route 是动态发现的,新 route 上线也要补零。
-			// Add(0) 对已存在的 series 无副作用(counter 不倒退),对不存在的则创建出来。
-			//
-			// ── 一个刻意的取舍:route 是【动态】标签,却仍用了「预初始化」这个本该给
-			//    【编译期已知的有限标签】用的手法。不是疏忽,是权衡后的选择,记在这里免得
-			//    下一个人以为是漏了。
-			//
-			// 严格的标准做法是两段叠加:
-			//    reason(3 个值,编译期已知) → 预初始化;
-			//    route (动态发现)          → 只导出当前存在的,消失的用 Delete 摘掉,
-			//                                让 Prometheus 的 staleness 机制生效。
-			// 本代码库对 gauge 正是这么做的(resettable + 每轮 Reset)。counter 不能 Reset
-			// (会破坏单调性),对应手段是 DeleteLabelValues。
-			//
-			// 这里【不做】那一步,因为代价大于收益:
-			//  · 残留的表现只是「一条恒 0 的平线」,当前无任何消费方(告警规则里零引用);
-			//  · 残留有界且自愈 —— client_golang 把子指标常驻内存、会一直导出(实测:停止
-			//    Add 后仍被 Collect,只有 Delete 能摘),但 exporter 随 chart 升级重启即清空;
-			//  · route 极少增删(ModelRoute 是稳定对象,不是 pod);
-			//  · 而 Delete 会在 route 短暂重建(如 MR 先删后建)时丢掉累计值,increase() 跨
-			//    该点少算 —— 为清一条无人看的平线,换来真实数据的不连续,不划算。
-			//  · 另外 refresh() 在 apiserver 出错时【保留上次映射】而不是清空,所以抖动本身
-			//    不会让 route 消失 —— 这也让 Delete 能挽回的场景进一步变窄。
-			//
-			// 【什么时候该回来补上 Delete】:route 变得频繁增删(如按租户动态建 ModelRoute),
-			// 或有告警/扩缩容开始消费本指标 —— 那时恒 0 的平线会变成误导。
-			for _, route := range routes {
-				service := p.serviceOf(route)
-				for _, reason := range rejectReasons {
-					p.m.rejected.WithLabelValues(service, route, reason).Add(0)
-				}
+			continue
+		}
+		rejOK[base] = true
+		// ⚠️ 先把「当前所有 route x 所有 reason」的 series 预初始化成 0。
+		//
+		// 不这么做的话:counter 在第一次 Add 之前【不存在】,而 openresty 只在真发生 429 时
+		// 才往 by_route 里放条目 —— 于是「一次 429 都没有」表现为【空 vector】,与「采集断了」
+		// 完全无法区分(实测 2026-08-31:openresty 重建后 by_route={},该指标整个消失)。
+		// 空 vector 的后果比"值为 0"严重得多:
+		//   - sum()/rate() 套上去仍是空,**不会**变成 0;
+		//   - 基于它的告警表达式返回空 → 永远不触发(不是判为 0 不告警,是根本没值可判);
+		//   - 面板空白,看起来像监控挂了。
+		// 对照:同一次 poll 的 adaptive_cc_rej 是 gauge、每轮 Set(0),所以恒有 series。
+		//
+		// 放在每轮而不是启动时一次:route 是动态发现的,新 route 上线也要补零。
+		// Add(0) 对已存在的 series 无副作用(counter 不倒退),对不存在的则创建出来。
+		//
+		// ── 一个刻意的取舍:route 是【动态】标签,却仍用了「预初始化」这个本该给
+		//    【编译期已知的有限标签】用的手法。不是疏忽,是权衡后的选择,记在这里免得
+		//    下一个人以为是漏了。
+		//
+		// 严格的标准做法是两段叠加:
+		//    reason(3 个值,编译期已知) → 预初始化;
+		//    route (动态发现)          → 只导出当前存在的,消失的用 Delete 摘掉,
+		//                                让 Prometheus 的 staleness 机制生效。
+		// 本代码库对 gauge 正是这么做的(resettable + 每轮 Reset)。counter 不能 Reset
+		// (会破坏单调性),对应手段是 DeleteLabelValues。
+		//
+		// 这里【不做】那一步,因为代价大于收益:
+		//  · 残留的表现只是「一条恒 0 的平线」,当前无任何消费方(告警规则里零引用);
+		//  · 残留有界且自愈 —— client_golang 把子指标常驻内存、会一直导出(实测:停止
+		//    Add 后仍被 Collect,只有 Delete 能摘),但 exporter 随 chart 升级重启即清空;
+		//  · route 极少增删(ModelRoute 是稳定对象,不是 pod);
+		//  · 而 Delete 会在 route 短暂重建(如 MR 先删后建)时丢掉累计值,increase() 跨
+		//    该点少算 —— 为清一条无人看的平线,换来真实数据的不连续,不划算。
+		//  · 另外 refresh() 在 apiserver 出错时【保留上次映射】而不是清空,所以抖动本身
+		//    不会让 route 消失 —— 这也让 Delete 能挽回的场景进一步变窄。
+		//
+		// 【什么时候该回来补上 Delete】:route 变得频繁增删(如按租户动态建 ModelRoute),
+		// 或有告警/扩缩容开始消费本指标 —— 那时恒 0 的平线会变成误导。
+		for _, t := range targets {
+			if p.baseOf(t) != base {
+				continue
 			}
-			for route, byReason := range rj.ByRoute {
-				service := p.serviceOf(route)
-				for reason, cur := range byReason {
-					key := route + "|" + reason
-					last := p.prev[key]
-					if cur >= last {
-						p.m.rejected.WithLabelValues(service, route, reason).Add(cur - last)
-					} else { // openresty worker 重启 → reject_stat 清零:当整段增量补上
-						p.m.rejected.WithLabelValues(service, route, reason).Add(cur)
-					}
-					p.prev[key] = cur
+			for _, reason := range rejectReasons {
+				p.m.rejected.WithLabelValues(t.service, t.route, reason).Add(0)
+			}
+		}
+		for route, byReason := range rj.ByRoute {
+			service, known := svcOn[tkey{base, route}]
+			if !known {
+				service = "unknown"
+			}
+			for reason, cur := range byReason {
+				key := base + "|" + route + "|" + reason
+				last := p.prev[key]
+				if cur >= last {
+					p.m.rejected.WithLabelValues(service, route, reason).Add(cur - last)
+				} else { // openresty worker 重启 → reject_stat 清零:当整段增量补上
+					p.m.rejected.WithLabelValues(service, route, reason).Add(cur)
 				}
+				p.prev[key] = cur
 			}
 		}
 	}
 
-	// 全局端点(/_reject_stats)失败算在所有 route 头上 —— 它不属于某一条。
+	// The per-openresty 429 endpoint failing counts against every route on that openresty.
 	now := float64(time.Now().Unix())
-	for _, route := range routes {
-		if routeOK[route] && ok {
-			p.m.pollUp.WithLabelValues(route).Set(1)
-			p.m.pollLastOK.WithLabelValues(route).Set(now)
+	for _, t := range targets {
+		base := p.baseOf(t)
+		if targetOK[tkey{base, t.route}] && rejOK[base] {
+			p.m.pollUp.WithLabelValues(t.service, t.route).Set(1)
+			p.m.pollLastOK.WithLabelValues(t.service, t.route).Set(now)
 		} else {
-			p.m.pollUp.WithLabelValues(route).Set(0)
+			p.m.pollUp.WithLabelValues(t.service, t.route).Set(0)
 		}
 	}
 }
@@ -369,14 +403,8 @@ func (p *orPoller) pollErr(what, route string, err error) {
 	log.Printf("openresty-poll: %s route=%s: %v", what, route, err)
 }
 
-// pollErrRoute:记错误并把该 route 标为本轮失败(pollErr 的 per-route 版)。
-func (p *orPoller) pollErrRoute(routeOK map[string]bool, what, route string, err error) {
-	p.pollErr(what, route, err)
-	routeOK[route] = false
-}
-
-func (p *orPoller) getJSON(ctx context.Context, path string, v interface{}) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.baseURL+path, nil)
+func (p *orPoller) getJSON(ctx context.Context, base, path string, v interface{}) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 	if err != nil {
 		return err
 	}
