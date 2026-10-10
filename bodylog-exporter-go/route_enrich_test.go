@@ -16,10 +16,10 @@ func TestBackendIP(t *testing.T) {
 	cases := map[string]string{
 		"10.0.0.5:8050":           "10.0.0.5",
 		"10.0.0.5:8050 (retry#1)": "10.0.0.5",
-		"10.102.29.46:8071":       "10.102.29.46",
-		"  10.0.0.5:8050  ":       "10.0.0.5",
-		"(none)":                  "(none)",
-		"":                        "",
+		"10.102.29.46:8071":            "10.102.29.46",
+		"  10.0.0.5:8050  ":         "10.0.0.5",
+		"(none)":                       "(none)",
+		"":                             "",
 	}
 	for in, want := range cases {
 		if got := backendIP(in); got != want {
@@ -44,11 +44,11 @@ func TestSplitNsName(t *testing.T) {
 
 func TestNormalizeServiceLabel(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"kimi/kimi-k25-leader", "kimi/kimi-k25"},                                              // LWS leader → 逻辑服务名
+		{"kimi/kimi-k25-leader", "kimi/kimi-k25"},                                  // LWS leader → 逻辑服务名
 		{"model-service/fallback-model-service-01", "model-service/fallback-model-service-01"}, // 非 LWS,原样
-		{"kimi-k25-leader", "kimi-k25"},                                                        // 无 ns 也剥
-		{"kimi/kimi-k25", "kimi/kimi-k25"},                                                     // 已无后缀,不动
-		{"foo-leader/bar", "foo-leader/bar"},                                                   // "-leader" 在 ns 段(结尾是 bar)→ 不误剥
+		{"kimi-k25-leader", "kimi-k25"},                                            // 无 ns 也剥
+		{"kimi/kimi-k25", "kimi/kimi-k25"},                                         // 已无后缀,不动
+		{"foo-leader/bar", "foo-leader/bar"},                                       // "-leader" 在 ns 段(结尾是 bar)→ 不误剥
 	}
 	for _, c := range cases {
 		if got := normalizeServiceLabel(c.in); got != c.want {
@@ -82,7 +82,7 @@ func newTestResolver(t *testing.T, srv *httptest.Server) *podRouteResolver {
 	r := newPodRouteResolver(prometheus.NewRegistry())
 	r.apiBase = srv.URL
 	r.client = srv.Client()
-	r.tokenPath = "/nonexistent-token"             // mock 不校验
+	r.tokenPath = "/nonexistent-token" // mock 不校验
 	r.groups = []string{"routing.modelsphere.dev"} // single group; the two-group cases set it themselves
 	return r
 }

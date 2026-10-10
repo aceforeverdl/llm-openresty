@@ -114,12 +114,12 @@ func main() {
 		case len(orc.staticRoutes) > 0:
 			rs := orc.staticRoutes
 			log.Printf("openresty-poll: %s routes=%v(静态) every %s", orc.baseURL, rs, orc.interval)
-			// 静态 route 无 ModelRoute 来源 → service=unknown
+			// static routes have no ModelRoute behind them -> service=unknown
 			go newORPoller(orc, newORMetrics(reg), func() []string { return rs }, nil).run(ctx)
 		case res != nil:
 			// Each ModelRoute is polled on the openresty its spec.nginx.service names (OPENRESTY_POLL_PER_SERVICE,
 			// default on); OPENRESTY_POLL_URL is the fallback for ModelRoutes that name none.
-			log.Printf("openresty-poll: routes=<ModelRoute 动态发现> per-service=%v fallback=%s every %s", res.perService, orc.baseURL, orc.interval)
+			log.Printf("openresty-poll: routes=<discovered from ModelRoutes> per-service=%v fallback=%s every %s", res.perService, orc.baseURL, orc.interval)
 			go newORPollerTargets(orc, newORMetrics(reg), res.getTargets).run(ctx)
 		default:
 			// 非 in-cluster 又没静态 route → 无路可 poll,不启动(避免 poller 空转还报 pollUp=1)。
