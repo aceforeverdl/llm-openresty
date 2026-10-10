@@ -64,12 +64,6 @@ for p in 28955 28956; do setsid nohup "$PY" "$MOCK" --port $p --name m-$p --outp
 sleep 3; "$OPENRESTY" -p "$PREFIX" -c nginx.conf; sleep 2
 
 P=0; F=0; ok(){ echo "  PASS: $1"; P=$((P+1)); }; no(){ echo "  FAIL: $1"; F=$((F+1)); }
-A="Authorization: Bearer $KEY"; H="Content-Type: application/json"
-body(){ echo "{\"model\":\"$1\",\"stream\":${2:-false},\"stream_options\":{\"include_usage\":true},\"chunk_delay_ms\":10,\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"; }
-# 经 8080 dispatch,路径带 key
-dget(){ curl -s -w "\n%{http_code}" -H "$A" -H "$H" -d "$(body "$2" "${3:-false}")" "http://127.0.0.1:19080/$1/v1/chat/completions"; }
-
-P=0; F=0; ok(){ echo "  PASS: $1"; P=$((P+1)); }; no(){ echo "  FAIL: $1"; F=$((F+1)); }
 mkbody(){ "$PY" -c "import json,sys;print(json.dumps({'model':'x','stream':False,'max_tokens':4,'messages':[{'role':'user','content':'a'*int(sys.argv[1])}]}))" "$1" > "$PREFIX/body_$1"; }
 code(){ curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
           --data-binary @"$PREFIX/body_$2" "http://127.0.0.1:19780/$1/v1/chat/completions"; }
@@ -81,4 +75,4 @@ c=$(code big 12000000);   [ "$c" = 200 ] && ok "12MB to the 50m route -> 200 (ov
 c=$(code big 120000000);  [ "$c" = 413 ] && ok "120MB to the 50m route -> 413 (dispatch 100m ceiling)" || no "120MB big -> $c"
 grep -q 'client intended to send too large body: 12000' "$PREFIX/logs/error.log" && ok "the 12MB refusal is logged" || no "no too-large log line for 12MB"
 echo "==== result: PASS=$P FAIL=$F ===="
-[ "$F" -eq 0 ] && echo "ALL GOOD" || echo "HAS FAILURES"
+[ "$F" -eq 0 ] && echo "ALL GOOD" || { echo "HAS FAILURES"; exit 1; }
