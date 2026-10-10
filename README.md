@@ -111,6 +111,14 @@ Useful optional fields:
 | `reject_rules` | Reject by request content (see below) |
 | `api_keys` | Per-route key table; defaults to the shared one |
 
+### Request body limit
+
+LLM routes default to a 10m request body (`client_max_body_size`, set at http level in
+`session_base.conf`, with `client_body_buffer_size` 10m so such bodies never spill to disk). A route
+raises or lowers it with its own `client_max_body_size <size>;` in its server block -- autoconfig
+renders that from `max_body_size` in the ModelRoute values. The dispatch server's 100m is the ceiling
+for any route. Behind CART, raise CART's `max_body_size` too: it defaults to the same 10m.
+
 ## Session id extraction
 
 Checked in order; the first non-blank value wins:

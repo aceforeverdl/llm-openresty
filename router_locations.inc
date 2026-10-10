@@ -17,22 +17,10 @@
     set_real_ip_from unix:;
     real_ip_header    X-Real-IP;
 
-    # buffer 决定 get_body_data() 能读到多大 body:超过则 nginx 写临时文件、返回 nil,
-    # bodylog 记不到内容(见 lua/bodylog.lua else 分支)。2m→4m 后 2~4MB 的请求能被
-    # bodylog 按 _G.bodylog_max_req 真截断,而非记空串。
-    # 4m→10m(2026-09-08):与本层 client_max_body_size 相等 → **LLM 请求再也不会落临时文件**,
-    #   不再是"少一些",而是结构上不可能。实测原因:全天 1330 条截断里 1051 条 body 全空
-    #   (p50 4.3MB / p90 7.3MB),占全天 prompt token 的 4.9%,基于 bodylog 的命中率分析
-    #   系统性缺这一块;顺带省掉每天 1051 次临时文件的一写一读。
-    #   内存:nginx 按 min(content-length, 本值) 分配;实测 >2MB 的请求同时在传峰值 8 条 / 45MB
-    #   (same order of magnitude in two independent environments, bare metal and k8s).
-    # max_body 10m:业务上限落在这一层。dispatch(:8080)已抬到 100m 只当天花板
-    # (为了让视频生成那类 64MB 的 base64 请求进得来),所以经 8080 的 LLM 流量由这里兜住。
-    # 10m = 与下游 CART 的 max_body_size 默认值对齐:再大也会被 CART 拒,不如在这里先拒。
-    # 注意这同时收紧了「内网直连 per-model 端口」的老路径(原 50m)—— 那条路径上真有 >10m 的
-    # 用法的话,要么调这里、要么同时调 CART。
-    client_body_buffer_size 10m;
-    client_max_body_size    10m;
+    # client_max_body_size / client_body_buffer_size are NOT set here any more: the 10m defaults live
+    # at http level in session_base.conf, so a route's own server block can override the limit with a
+    # single `client_max_body_size <size>;` (nginx refuses the same directive twice in one server, which
+    # is why it had to leave this shared include). See session_base.conf for why 10m.
 
     # stream responses without accumulating — minimize SSE chunk coalescing
     postpone_output 0;
