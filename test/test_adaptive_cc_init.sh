@@ -44,6 +44,7 @@ cat <<'EOF'
   init_worker_by_lua_block {
     math.randomseed(ngx.now()*1000 + ngx.worker.pid())
     _G.TPS_BUCKETS = {5,10,20,40,80,150,300}
+    _G.ADAPTIVE_CC_HOLD_WHEN_IDLE = false   -- pinned: these checks predate the hold-when-idle default
     _G.ADAPTIVE_CC_MIN_FRAC = 0.4   -- pinned: only explicit adaptive_cc_min=2 is used below
     -- static max = 2 peers x 100 = 200, min = 2, ABS = 0 so only the relative gates and init matter.
     -- Short cc TTL (6s) + tps_ttl 8s so the expiry check (⑥) fits in the run.

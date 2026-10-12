@@ -41,6 +41,64 @@ end
 -- 行为：第一次调用时执行 factory()，自动补全默认字段，注册到 _G.__route_opts[name]，
 -- 并 worker 0 上启动 health/cluster_avg timer。重复调用 idempotent (直接返 cached opts)。
 -- ══════════════════════════════════════════════════════════════════════
+-- Route option defaults: the one place register_route takes them from, and what /_route_opts shows as
+-- each catalog option's "fallback" (lua/directives.lua). A function entry reads its global when called,
+-- so the session_base.conf a host actually runs decides, not the copy in this repo.
+-- Options whose default is derived from other options (adaptive_cc_min / _init / _init_frac / _interval)
+-- are not here; the catalog describes them in words.
+local function global(name) return function() return _G[name] end end
+M.DEFAULTS = {
+    -- adaptive concurrency
+    adaptive_cc                = function() return _G.ADAPTIVE_CC_DEFAULT and true or false end,
+    adaptive_cc_min_frac       = global("ADAPTIVE_CC_MIN_FRAC"),
+    -- `~= false`: a session_base.conf older than this default has no such global, and hold must still be on
+    adaptive_cc_hold_when_idle = function() return _G.ADAPTIVE_CC_HOLD_WHEN_IDLE ~= false end,
+    adaptive_cc_use_ttft       = true,
+    adaptive_cc_inc            = global("ADAPTIVE_CC_INC"),
+    adaptive_cc_dec            = global("ADAPTIVE_CC_DEC"),
+    adaptive_cc_abs            = global("ADAPTIVE_CC_ABS"),
+    adaptive_cc_pressure_frac  = global("ADAPTIVE_CC_PRESSURE_FRAC"),
+    adaptive_cc_slack_frac     = global("ADAPTIVE_CC_SLACK_FRAC"),
+    adaptive_cc_ttl            = global("ADAPTIVE_CC_TTL"),
+    -- thresholds
+    tps_limit_tps              = global("TPS_LIMIT_TPS"),
+    ttft_limit_ms              = global("TTFT_LIMIT_MS"),
+    -- capacity & failover
+    default_max                = global("MAX_CONCURRENCY_PER_PEER"),
+    rt_limit_factor            = global("RT_LIMIT_FACTOR"),
+    max_more_tries             = 2,
+    cross_tier_fallback        = false,
+    -- health checks / routing
+    health_check_interval      = 10,
+    health_ban_ttl             = 300,
+    health_probe_path          = global("DEFAULT_HEALTH_PROBE_PATH"),
+    cluster_avg_interval       = 30,
+    session_affinity_enabled   = function() return _G.SESSION_AFFINITY_ENABLED == true end,
+    -- TTFT / TPS measurement and rejection probes
+    ttft_ewma_alpha            = 0.3,
+    ttft_window                = global("TTFT_WINDOW"),
+    ttft_ttl                   = 60,
+    ttft_probe_window          = 10,
+    ttft_probe_per_window      = 5,
+    tps_ewma_alpha             = 0.3,
+    tps_window                 = global("TPS_WINDOW"),
+    tps_ttl                    = 60,
+    tps_probe_window           = 10,
+    tps_probe_per_window       = 5,
+    tps_min_tokens             = 16,
+    tps_min_decode_s           = 0.5,
+    -- observability / other
+    expose_routed_peer         = false,
+    bodylog_default_pct        = global("BODYLOG_DEFAULT_PCT"),
+    reject_rules_status        = function() return _G.REJECT_RULES_DEFAULT_STATUS or 429 end,
+}
+function M.default_of(key)
+    local d = M.DEFAULTS[key]
+    if type(d) == "function" then return d() end
+    return d
+end
+local D = M.default_of
+
 function _G.register_route(name, opts_factory)
     _G.__route_opts = _G.__route_opts or {}
     if _G.__route_opts[name] then return _G.__route_opts[name] end
@@ -63,6 +121,11 @@ function _G.register_route(name, opts_factory)
         _G.__route_failed[name] = true
         return nil
     end
+    -- Keys the route conf set itself, recorded before any default is filled in, so /_route_opts can
+    -- tell a configured value from an engine default.
+    local set_keys = {}
+    for k in pairs(opts) do if type(k) == "string" then set_keys[k] = true end end
+    opts._set_keys = set_keys
     opts.route_name = name
     -- 路由声明的指标表(未配 = nil → 走静态单阈值)。谁写进来的引擎不关心:
     -- 可以是外部工具渲染的,也可以在 conf 里手写 —— 对引擎完全等价。
@@ -130,7 +193,7 @@ function _G.register_route(name, opts_factory)
     opts.bodylog_ctl_dict          = opts.bodylog_ctl_dict          or ("bodylog_ctl_"  .. name)
     -- expose_routed_peer:是否把 <ip:port>[/GPU型号] 回显进响应头 X-Routed-Peer。
     -- 默认 false(不外泄内部 peer);仅显式配 true 才开。非布尔值一律按 false 处理。
-    opts.expose_routed_peer        = (opts.expose_routed_peer == true)
+    util.bool_opt(opts, "expose_routed_peer", D("expose_routed_peer"), name)
     opts.api_keys_dict             = opts.api_keys_dict             or "api_keys"
     -- 默认 key 表来自 lua/api_keys.lua(唯一来源)—— video 这类不走 lua 引擎的路由
     -- 也读同一张表,密钥不必再写进 ModelRoute / chart values / git。
@@ -141,39 +204,40 @@ function _G.register_route(name, opts_factory)
     --   ② /_health_status 要报**这条路由**的真实鉴权状态,而它可能在该路由还没
     --      服务过任何请求时就被访问 —— 惰性计算那时只能读到 nil。
     opts._api_keys_empty           = (next(opts.api_keys) == nil)
-    opts.default_max               = opts.default_max               or _G.MAX_CONCURRENCY_PER_PEER
+    opts.default_max               = opts.default_max               or D("default_max")
     -- 并发实时阈值放大倍数(每路由可配;缺省回退全局 _G.RT_LIMIT_FACTOR)
-    opts.rt_limit_factor           = opts.rt_limit_factor           or _G.RT_LIMIT_FACTOR
+    opts.rt_limit_factor           = opts.rt_limit_factor           or D("rt_limit_factor")
     if type(opts.rt_limit_factor) ~= "number" or opts.rt_limit_factor <= 0 then
         ngx.log(ngx.ERR, "[", name, "] rt_limit_factor=", tostring(opts.rt_limit_factor),
-                " 非法(需正数)— 回退 ", _G.RT_LIMIT_FACTOR)
-        opts.rt_limit_factor = _G.RT_LIMIT_FACTOR
+                " is invalid (need a positive number) - falling back to ", D("rt_limit_factor"))
+        opts.rt_limit_factor = D("rt_limit_factor")
     end
-    if opts.cch_default_enabled        == nil then opts.cch_default_enabled        = _G.CCH_STRIP_DEFAULT_ENABLED end
+    util.bool_opt(opts, "cch_default_enabled", _G.CCH_STRIP_DEFAULT_ENABLED == true, name)
     -- Kimi tool_call_id normalize 每路由默认（factory 显式设 false 即永久关，重启也不恢复；缺省回落全局 _G.KIMI_NORMALIZE_DEFAULT_ENABLED）
-    if opts.kimi_normalize_default_enabled == nil then opts.kimi_normalize_default_enabled = _G.KIMI_NORMALIZE_DEFAULT_ENABLED end
-    if opts.bodylog_default_enabled    == nil then opts.bodylog_default_enabled    = _G.BODYLOG_DEFAULT_ENABLED end
-    opts.bodylog_default_pct       = opts.bodylog_default_pct       or _G.BODYLOG_DEFAULT_PCT
-    if opts.disable_body_user_affinity == nil then opts.disable_body_user_affinity = _G.DISABLE_BODY_USER_AFFINITY end
+    util.bool_opt(opts, "kimi_normalize_default_enabled", _G.KIMI_NORMALIZE_DEFAULT_ENABLED == true, name)
+    util.bool_opt(opts, "bodylog_default_enabled", _G.BODYLOG_DEFAULT_ENABLED == true, name)
+    opts.bodylog_default_pct       = opts.bodylog_default_pct       or D("bodylog_default_pct")
+    util.bool_opt(opts, "disable_body_user_affinity", _G.DISABLE_BODY_USER_AFFINITY == true, name)
     -- session 亲和性每路由开关:factory 不设(nil)则回落全局 _G.SESSION_AFFINITY_ENABLED。
     -- 显式 false → 本路由忽略所有 sid 走 least_conn;显式 true → 即便全局关本路由仍开粘性。
-    if opts.session_affinity_enabled   == nil then opts.session_affinity_enabled   = _G.SESSION_AFFINITY_ENABLED end
-    opts.health_check_interval     = opts.health_check_interval     or 10
-    opts.health_ban_ttl            = opts.health_ban_ttl            or 300
-    opts.health_probe_path         = opts.health_probe_path         or _G.DEFAULT_HEALTH_PROBE_PATH  -- 健康探针 GET 的路径,per-route 可配(后端探测接口不同的路由可覆盖)
-    opts.cluster_avg_interval      = opts.cluster_avg_interval      or 30
+    util.bool_opt(opts, "session_affinity_enabled", D("session_affinity_enabled"), name)
+    opts.health_check_interval     = opts.health_check_interval     or D("health_check_interval")
+    opts.health_ban_ttl            = opts.health_ban_ttl            or D("health_ban_ttl")
+    opts.health_probe_path         = opts.health_probe_path         or D("health_probe_path")  -- path the health probe GETs; per route, for backends whose probe endpoint differs
+    opts.cluster_avg_interval      = opts.cluster_avg_interval      or D("cluster_avg_interval")
     -- ── 跨层单请求 fallback(默认关)──
     -- cross_tier_fallback:开时高优层 5xx/连接失败即刻兜到低优层代表(不等 health-timer ban)。
-    --   bool 化:任何 truthy → true、缺省/false/nil → false,避免 factory 传字符串 "false" 被当真。
-    opts.cross_tier_fallback = opts.cross_tier_fallback and true or false
+    --   Parsed with util.bool_opt: a plain truthiness test turned "False" / "0" into "on" (any string
+    --   is truthy in Lua). Unset -> false; unrecognised -> false with an ERR.
+    util.bool_opt(opts, "cross_tier_fallback", D("cross_tier_fallback"), name)
     -- max_more_tries:balancer.set_more_tries 的重试预算上限(需正整数;非法回退 2)。
     local mmt = tonumber(opts.max_more_tries)
     if mmt == nil then
-        opts.max_more_tries = 2
+        opts.max_more_tries = D("max_more_tries")
     elseif mmt < 1 or mmt ~= math.floor(mmt) then
         ngx.log(ngx.ERR, "[", name, "] max_more_tries=", tostring(opts.max_more_tries),
-                " 非法(需 >=1 整数)— 回退 2")
-        opts.max_more_tries = 2
+                " is invalid (need an integer >= 1) - falling back to ", D("max_more_tries"))
+        opts.max_more_tries = D("max_more_tries")
     else
         opts.max_more_tries = mmt
     end
@@ -181,18 +245,19 @@ function _G.register_route(name, opts_factory)
     -- TTFT 限流默认值。dict 默认指 session_route.conf 里统一声明的共享 "ttft_stat"(所有路由共用,key 带
     -- <route>[:<model>] 前缀);阈值默认用全局 _G.TTFT_LIMIT_MS。两者都可在 factory 覆盖。
     opts.ttft_dict                 = opts.ttft_dict                 or "ttft_stat"
-    opts.ttft_limit_ms             = opts.ttft_limit_ms             or _G.TTFT_LIMIT_MS
-    opts.ttft_ewma_alpha           = opts.ttft_ewma_alpha           or 0.3
+    opts.ttft_limit_ms             = opts.ttft_limit_ms             or D("ttft_limit_ms")
+    util.bool_opt(opts, "ttft_429_default_enabled", true, name)   -- nil used to mean on; now a boolean
+    opts.ttft_ewma_alpha           = opts.ttft_ewma_alpha           or D("ttft_ewma_alpha")
     -- alpha 必须在 [0,1];配错(如把 0.3 写成 30)会算出负/乱 EWMA → 限流静默失效
     if opts.ttft_ewma_alpha < 0 or opts.ttft_ewma_alpha > 1 then
         ngx.log(ngx.ERR, "[", name, "] ttft_ewma_alpha=", opts.ttft_ewma_alpha,
                 " out of [0,1] — clamping")
         opts.ttft_ewma_alpha = math.max(0, math.min(1, opts.ttft_ewma_alpha))
     end
-    opts.ttft_ttl                  = opts.ttft_ttl                  or 60
-    opts.ttft_probe_window         = opts.ttft_probe_window         or 10
-    opts.ttft_probe_per_window     = opts.ttft_probe_per_window     or 5
-    opts.ttft_window               = opts.ttft_window               or _G.TTFT_WINDOW
+    opts.ttft_ttl                  = opts.ttft_ttl                  or D("ttft_ttl")
+    opts.ttft_probe_window         = opts.ttft_probe_window         or D("ttft_probe_window")
+    opts.ttft_probe_per_window     = opts.ttft_probe_per_window     or D("ttft_probe_per_window")
+    opts.ttft_window               = opts.ttft_window               or D("ttft_window")
     -- ── TPS 限流(输出 token 速率,按路由 opt-in)默认值 ──
     -- tps_limit_tps 默认 nil(=opt-in:没配则 tps_dict_if_on 返 nil → 全链路短路,零行为变化);
     -- dict 默认共享 "tps_stat";其余节奏参数对位 TTFT。tps_min_tokens 滤短响应(速率失真噪声)。
@@ -202,30 +267,30 @@ function _G.register_route(name, opts_factory)
     -- (供 /_tps_status 的 tps_limit_source)。不能靠比较数值判断 —— 路由显式配的值可能
     -- 恰好等于全局默认(model-service-0.1 就是 20)。
     opts.tps_limit_explicit        = (opts.tps_limit_tps ~= nil)
-    opts.tps_limit_tps             = opts.tps_limit_tps             or _G.TPS_LIMIT_TPS
-    opts.tps_ewma_alpha            = opts.tps_ewma_alpha            or 0.3
+    opts.tps_limit_tps             = opts.tps_limit_tps             or D("tps_limit_tps")
+    opts.tps_ewma_alpha            = opts.tps_ewma_alpha            or D("tps_ewma_alpha")
     if opts.tps_ewma_alpha < 0 or opts.tps_ewma_alpha > 1 then
         ngx.log(ngx.ERR, "[", name, "] tps_ewma_alpha=", opts.tps_ewma_alpha,
                 " out of [0,1] — clamping")
         opts.tps_ewma_alpha = math.max(0, math.min(1, opts.tps_ewma_alpha))
     end
-    opts.tps_ttl                   = opts.tps_ttl                   or 60
-    opts.tps_probe_window          = opts.tps_probe_window          or 10
-    opts.tps_probe_per_window      = opts.tps_probe_per_window      or 5
-    opts.tps_window                = opts.tps_window                or _G.TPS_WINDOW
-    opts.tps_min_tokens            = opts.tps_min_tokens            or 16
+    opts.tps_ttl                   = opts.tps_ttl                   or D("tps_ttl")
+    opts.tps_probe_window          = opts.tps_probe_window          or D("tps_probe_window")
+    opts.tps_probe_per_window      = opts.tps_probe_per_window      or D("tps_probe_per_window")
+    opts.tps_window                = opts.tps_window                or D("tps_window")
+    opts.tps_min_tokens            = opts.tps_min_tokens            or D("tps_min_tokens")
     -- tps_min_decode_s:请求**总时长**下限(2026-09-07 口径变更后分母含 prefill;沿用旧参数名不改配置)
-    opts.tps_min_decode_s          = opts.tps_min_decode_s          or 0.5
+    opts.tps_min_decode_s          = opts.tps_min_decode_s          or D("tps_min_decode_s")
     -- ── 规则化请求拒绝(reject_rules,按请求内容匹配 → 可配 status,默认 429)默认值 ──
     -- opts.reject_rules 为 nil 时天然 opt-in(该路由不启用);配了则由 validate_reject_rules 校验+归一
     --   (丢弃非法规则、补 name/status 默认),存回 opts.reject_rules。命中逻辑见 lua/reject_rules.lua。
     -- 热切开关复用 cch_ctl_dict 的 "reject_rules_enabled"(见 eval_reject_rules / dbg_reject_rules_toggle)。
-    opts.reject_rules_status       = opts.reject_rules_status       or _G.REJECT_RULES_DEFAULT_STATUS or 429
+    opts.reject_rules_status       = opts.reject_rules_status       or D("reject_rules_status")
     if type(opts.reject_rules_status) ~= "number" or opts.reject_rules_status < 400 or opts.reject_rules_status > 599 then
         ngx.log(ngx.ERR, "[", name, "] reject_rules_status=", tostring(opts.reject_rules_status), " 非法(需 400-599)— 回退 429")
         opts.reject_rules_status = 429
     end
-    if opts.reject_rules_default_enabled == nil then opts.reject_rules_default_enabled = _G.REJECT_RULES_DEFAULT_ENABLED end
+    util.bool_opt(opts, "reject_rules_default_enabled", _G.REJECT_RULES_DEFAULT_ENABLED == true, name)
     opts.reject_rules              = reject_rules.validate_reject_rules(name, opts.reject_rules)
     -- ── 自适应并发(AIMD;配 tps_limit_tps 默认开,与 TPS 硬熔断互斥)默认值 ──
     -- adaptive_cc=true 时:复用 TPS EWMA 当反馈信号,每 adaptive_cc_interval 调一次池并发上限——
@@ -236,34 +301,50 @@ function _G.register_route(name, opts_factory)
     -- 显式 adaptive_cc=false → 硬熔断;显式 true → 自适应。两种都没声明 → 保持 nil(无 tps 限流)。
     -- ⚠️ 必须与 tps.tps_dict_if_on 的闸门口径一致:一处认 tps_metrics 另一处不认的话,
     --    「只配 tps_metrics」的路由会走进硬 429 而不是 AIMD,与配了静态阈值的路由行为不一致。
+    -- adaptive_cc: unset follows _G.ADAPTIVE_CC_DEFAULT below, so only a value that is present is parsed.
+    -- A plain truthiness test left the string "off" / "false" meaning on, silently.
+    if opts.adaptive_cc ~= nil then
+        local b = util.parse_bool(opts.adaptive_cc)
+        if b == nil then
+            ngx.log(ngx.ERR, "[", name, "] adaptive_cc=", tostring(opts.adaptive_cc),
+                    " is not a boolean - treated as unset (global default)")
+        elseif type(opts.adaptive_cc) ~= "boolean" then
+            ngx.log(ngx.WARN, "[", name, "] adaptive_cc=", tostring(opts.adaptive_cc), " (", type(opts.adaptive_cc),
+                    ") read as ", tostring(b), "; write it as a boolean")
+        end
+        opts.adaptive_cc = b
+    end
     if opts.adaptive_cc == nil and (opts.tps_limit_tps or opts.tps_metrics) then
-        opts.adaptive_cc = _G.ADAPTIVE_CC_DEFAULT and true or nil
+        opts.adaptive_cc = D("adaptive_cc") or nil
     elseif opts.adaptive_cc == false then
         opts.adaptive_cc = nil                                       -- 显式关 = 走硬熔断(与"未开"同路径)
     end
     opts.adaptive_cc_min           = opts.adaptive_cc_min           -- 可选下限;不配 = 按 min_frac 从静态 max 派生
-    opts.adaptive_cc_min_frac      = opts.adaptive_cc_min_frac      or _G.ADAPTIVE_CC_MIN_FRAC  -- min 缺省 = 静态max×frac(≥1)
+    opts.adaptive_cc_min_frac      = opts.adaptive_cc_min_frac      or D("adaptive_cc_min_frac")  -- unset min = static max x frac (at least 1)
     -- Optional starting point inside [min, max]: a fresh/expired cc starts here, and the slack
     -- (low-traffic) shrink stops here instead of at min. Overload shrink can still go down to min.
     -- Neither set → init = min (previous behaviour). No global default on purpose.
     opts.adaptive_cc_init          = opts.adaptive_cc_init
     opts.adaptive_cc_init_frac     = opts.adaptive_cc_init_frac
-    -- Optional: hold cc when traffic is low or absent. Skips the slack shrink and writes cc without a
-    -- TTL, so neither a trickle nor a long idle lowers it. Growth (pressure / 429s) and overload shrink
-    -- are unchanged. Off unless set; no global default.
-    opts.adaptive_cc_hold_when_idle = opts.adaptive_cc_hold_when_idle
+    -- Hold cc when traffic is low or absent: skips the slack shrink and writes cc without a TTL, so
+    -- neither a trickle nor a long idle lowers it. Growth (pressure / 429s) and overload shrink are
+    -- unchanged. Default (M.DEFAULTS) is on; a route turns it off with adaptive_cc_hold_when_idle = false.
+    util.bool_opt(opts, "adaptive_cc_hold_when_idle", D("adaptive_cc_hold_when_idle"), name)
+    -- TTFT also judges the AIMD limit unless the route says false. Normalised so the effective value
+    -- is a boolean (it used to stay nil = on) and a string "False" means off rather than truthy-on.
+    util.bool_opt(opts, "adaptive_cc_use_ttft", D("adaptive_cc_use_ttft"), name)
     opts.adaptive_cc_interval      = opts.adaptive_cc_interval      or opts.tps_window  -- AIMD 步长,默认=tps_window
-    opts.adaptive_cc_dec           = opts.adaptive_cc_dec           or _G.ADAPTIVE_CC_DEC  -- EWMA<阈值 → ×dec(减)
-    opts.adaptive_cc_inc           = opts.adaptive_cc_inc           or _G.ADAPTIVE_CC_INC  -- EWMA>=阈值 → ×inc(增)
+    opts.adaptive_cc_dec           = opts.adaptive_cc_dec           or D("adaptive_cc_dec")  -- EWMA below threshold -> x dec (shrink)
+    opts.adaptive_cc_inc           = opts.adaptive_cc_inc           or D("adaptive_cc_inc")  -- EWMA at or above threshold -> x inc (grow)
     -- TTL of the adaptive_cc value: with no EWMA signal for this long it expires and the pool falls back to init (= min unless configured).
     -- 全局默认 _G.ADAPTIVE_CC_TTL(300s/5min):短暂信号缺口内保持,持续无信号才复位到 min。
-    opts.adaptive_cc_ttl           = opts.adaptive_cc_ttl           or _G.ADAPTIVE_CC_TTL
+    opts.adaptive_cc_ttl           = opts.adaptive_cc_ttl           or D("adaptive_cc_ttl")
     -- 爬升压力系数:cc 只在 当前并发 >= cc×frac(顶到边缘/在造成429)时才 ×inc(防轻流量跑飞)
-    opts.adaptive_cc_pressure_frac = opts.adaptive_cc_pressure_frac  or _G.ADAPTIVE_CC_PRESSURE_FRAC
+    opts.adaptive_cc_pressure_frac = opts.adaptive_cc_pressure_frac  or D("adaptive_cc_pressure_frac")
     -- 空闲缩系数:并发 < cc×slack_frac(余量太大)→ cc 也往下缩(补忙→闲 gap)
-    opts.adaptive_cc_slack_frac    = opts.adaptive_cc_slack_frac     or _G.ADAPTIVE_CC_SLACK_FRAC
+    opts.adaptive_cc_slack_frac    = opts.adaptive_cc_slack_frac     or D("adaptive_cc_slack_frac")
     -- 绝对头寸(slots):相对系数在小并发下带宽太窄,再兜一个绝对头寸(见全局 _G.ADAPTIVE_CC_ABS 注释)
-    if opts.adaptive_cc_abs == nil then opts.adaptive_cc_abs = _G.ADAPTIVE_CC_ABS end
+    if opts.adaptive_cc_abs == nil then opts.adaptive_cc_abs = D("adaptive_cc_abs") end
     if opts.adaptive_cc then
         if not opts.tps_limit_tps then
             ngx.log(ngx.ERR, "[", name, "] adaptive_cc=true 但缺 tps_limit_tps(自适应要它当阈值+开 TPS 测量)"
@@ -275,21 +356,21 @@ function _G.register_route(name, opts_factory)
             if type(opts.adaptive_cc_min_frac) ~= "number"
                or opts.adaptive_cc_min_frac <= 0 or opts.adaptive_cc_min_frac > 1 then
                 ngx.log(ngx.ERR, "[", name, "] adaptive_cc_min_frac=", tostring(opts.adaptive_cc_min_frac),
-                        " 非法(需 0<frac≤1)— 回落全局默认 ", tostring(_G.ADAPTIVE_CC_MIN_FRAC))
-                opts.adaptive_cc_min_frac = _G.ADAPTIVE_CC_MIN_FRAC
+                        " is invalid (need 0 < frac <= 1) - falling back to the global default ", tostring(D("adaptive_cc_min_frac")))
+                opts.adaptive_cc_min_frac = D("adaptive_cc_min_frac")
             end
             -- pressure_frac 必须 0<frac≤1(0/负 → 门永真 → 静默退回无脑涨 no-op);非法回落全局默认
             if type(opts.adaptive_cc_pressure_frac) ~= "number"
                or opts.adaptive_cc_pressure_frac <= 0 or opts.adaptive_cc_pressure_frac > 1 then
                 ngx.log(ngx.ERR, "[", name, "] adaptive_cc_pressure_frac=", tostring(opts.adaptive_cc_pressure_frac),
-                        " 非法(需 0<frac≤1)— 回落全局默认 ", tostring(_G.ADAPTIVE_CC_PRESSURE_FRAC))
-                opts.adaptive_cc_pressure_frac = _G.ADAPTIVE_CC_PRESSURE_FRAC
+                        " is invalid (need 0 < frac <= 1) - falling back to the global default ", tostring(D("adaptive_cc_pressure_frac")))
+                opts.adaptive_cc_pressure_frac = D("adaptive_cc_pressure_frac")
             end
             -- slack_frac 必须 0<frac<pressure_frac(留 [slack,pressure) 保持带防抖;≥pressure 会涨缩打架抖动)
             if type(opts.adaptive_cc_slack_frac) ~= "number"
                or opts.adaptive_cc_slack_frac <= 0 or opts.adaptive_cc_slack_frac >= opts.adaptive_cc_pressure_frac then
                 -- 回落取 min(全局默认, pressure×0.8):保证 < pressure_frac(即使 pressure 被配得很低)
-                local _sf = math.min(_G.ADAPTIVE_CC_SLACK_FRAC, opts.adaptive_cc_pressure_frac * 0.8)
+                local _sf = math.min(D("adaptive_cc_slack_frac"), opts.adaptive_cc_pressure_frac * 0.8)
                 ngx.log(ngx.ERR, "[", name, "] adaptive_cc_slack_frac=", tostring(opts.adaptive_cc_slack_frac),
                         " 非法(需 0<frac<pressure_frac ", tostring(opts.adaptive_cc_pressure_frac), ")— 回落 ", tostring(_sf))
                 opts.adaptive_cc_slack_frac = _sf
@@ -297,8 +378,8 @@ function _G.register_route(name, opts_factory)
             -- adaptive_cc_abs 必须是 ≥0 数字(负/非数 → 绝对头寸逻辑乱);非法回落全局默认
             if type(opts.adaptive_cc_abs) ~= "number" or opts.adaptive_cc_abs < 0 then
                 ngx.log(ngx.ERR, "[", name, "] adaptive_cc_abs=", tostring(opts.adaptive_cc_abs),
-                        " 非法(需 ≥0 数字)— 回落全局默认 ", tostring(_G.ADAPTIVE_CC_ABS))
-                opts.adaptive_cc_abs = _G.ADAPTIVE_CC_ABS
+                        " is invalid (need a number >= 0) - falling back to the global default ", tostring(D("adaptive_cc_abs")))
+                opts.adaptive_cc_abs = D("adaptive_cc_abs")
             end
             if opts.adaptive_cc_min ~= nil then
                 -- 下限必须 ≥1 的正整数(0.x 会让 limit<1 → 首个请求就 429,整路由挂),否则忽略回落派生
@@ -329,12 +410,6 @@ function _G.register_route(name, opts_factory)
                     opts.adaptive_cc_init_frac = nil
                 end
             end
-            -- Must be a real boolean: a string like "yes" would be truthy in Lua and silently turn it on.
-            if opts.adaptive_cc_hold_when_idle ~= nil and type(opts.adaptive_cc_hold_when_idle) ~= "boolean" then
-                ngx.log(ngx.ERR, "[", name, "] adaptive_cc_hold_when_idle=", tostring(opts.adaptive_cc_hold_when_idle),
-                        " is invalid (need true/false) - treated as false")
-                opts.adaptive_cc_hold_when_idle = nil
-            end
         end
     end
     -- M2: dict 存在性检查（防新模型 conf 漏声明 lua_shared_dict 时调试困难）
@@ -345,6 +420,29 @@ function _G.register_route(name, opts_factory)
             ngx.log(ngx.ERR, "[", name, "] register_route: required shared_dict '", dname,
                     "' (for opts.", fld, ") not declared — add `lua_shared_dict ", dname,
                     " <size>;` to this route's conf and reload")
+        end
+    end
+    -- init is clamped into [min, static max] every time it is used, silently (min and max move with the
+    -- peer list, so it cannot be rejected up front). Say once, at registration, when the configured value
+    -- does not fit the pool as it is now -- otherwise a too-small init_frac is quietly the same as min.
+    if opts.adaptive_cc and (opts.adaptive_cc_init or opts.adaptive_cc_init_frac) then
+        local models = {}
+        if opts.peers_by_model then for m in pairs(opts.peers_by_model) do models[#models + 1] = m end
+        else models[1] = false end
+        for _, m in ipairs(models) do
+            local maxcc = M.compute_static_max_cc(opts, m)
+            if maxcc > 0 then
+                local mincc = M.derive_mincc(opts, maxcc)
+                local raw = opts.adaptive_cc_init
+                    or math.max(1, math.floor(maxcc * opts.adaptive_cc_init_frac))
+                if raw < mincc or raw > maxcc then
+                    local eff = M.derive_initcc(opts, maxcc, mincc)
+                    ngx.log(ngx.WARN, "[", name, "]", m and (" model " .. m) or "", " adaptive_cc_init",
+                            opts.adaptive_cc_init and "" or "_frac", "=",
+                            tostring(opts.adaptive_cc_init or opts.adaptive_cc_init_frac), " gives ", raw,
+                            ", outside [min ", mincc, ", max ", maxcc, "] - effective init is ", eff)
+                end
+            end
         end
     end
     _G.__route_opts[name] = opts

@@ -31,6 +31,7 @@ http {
   init_worker_by_lua_block {
     math.randomseed(ngx.now()*1000 + ngx.worker.pid())
     _G.TPS_BUCKETS = {5,10,20,40,80,150,300}
+    _G.ADAPTIVE_CC_HOLD_WHEN_IDLE = false   -- pinned: these checks predate the hold-when-idle default
     _G.ADAPTIVE_CC_TTL = 40
     -- canary-like:min=5,阈值 tps_limit=30,ABS=5;per-peer max=200 → 静态max=400(不封顶);
     -- 加速收敛:interval=2s,inc=1.5,dec=0.7(仍是"减快增慢"方向,只是比生产 1.01/0.97 快,便于测)

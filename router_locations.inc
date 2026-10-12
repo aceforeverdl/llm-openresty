@@ -152,6 +152,11 @@
     location = /_route_state {
         content_by_lua_block { _G.dbg_route_state(_G.__route_opts[ngx.var.route]) }
     }
+    # /_route_opts — effective options after defaults/validation + derived adaptive_cc bounds. Read-only and
+    # open like /_tps_status: only catalog options are listed and peers are reduced to counts.
+    location = /_route_opts {
+        content_by_lua_block { _G.dbg_route_opts(_G.__route_opts[ngx.var.route]) }
+    }
     location = /_ttft_status {
         content_by_lua_block { _G.dbg_ttft_status(_G.__route_opts[ngx.var.route]) }
     }

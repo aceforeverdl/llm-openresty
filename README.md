@@ -146,11 +146,17 @@ fresh or expired limit starts there, and low traffic shrinks the limit only down
 Only overload pushes the limit below `init`, toward `min`; once the backend is healthy again
 the limit climbs back to `init` by the normal growth factor per interval, even under light
 traffic. Without it, `init` equals `min`.
-Setting `adaptive_cc_hold_when_idle = true` stops low or absent traffic from lowering the
-limit at all: no low-traffic shrink and the value never expires, while growth under
-pressure and overload shrink work as usual. It holds whatever value the limit has, including
-one an overload pushed below `init`: after such an overload followed by an idle period, the
-limit stays low and climbs back to `init` only once traffic returns.
+`adaptive_cc_hold_when_idle` (on by default, `_G.ADAPTIVE_CC_HOLD_WHEN_IDLE`) stops low or
+absent traffic from lowering the limit at all: no low-traffic shrink and the value never
+expires, while growth under pressure and overload shrink work as usual. It holds whatever
+value the limit has, including one an overload pushed below `init`: after such an overload
+followed by an idle period, the limit stays low and climbs back to `init` only once traffic
+returns. A route sets it to `false` to get the slack shrink and the limit TTL back.
+
+Boolean options (`cross_tier_fallback`, `adaptive_cc_hold_when_idle`, `adaptive_cc_use_ttft`)
+accept `true`/`false`, and also `yes`/`no`, `on`/`off`, `1`/`0` in any case with a warning;
+anything else is logged and the option's default applies. (A plain truthiness test used to read
+the string `"False"` as on.)
 
 **Content-based rejection (opt-in, off by default).** Rules match the request itself —
 `input_bytes`, `input_chars`, `messages_count`, `max_tokens`, `stream`, or any dotted
@@ -194,10 +200,19 @@ apart. Alert on `api_keys_configured: false`.
 Every `/v1/*` response carries `X-Routed-Session`, `X-Routed-Source`, `X-Routed-Mode`
 (`hash` / `least_conn` / `hash_fallback`), `X-Routed-Peer`, and `X-Routed-Retries`.
 
+`/_route_opts` (read-only, open like `/_tps_status`) lists the route's tunable options -- key, label, group, kind,
+default, description, in the same shape as the console's deploy form -- with the value the
+engine actually runs with and whether the route set it, plus the derived adaptive-concurrency
+bounds (static max, floor, start point) per sub-pool. The catalog lives in `lua/directives.lua`:
+`directives` holds the 16 options an operator is expected to tune; engine internals (AIMD
+coefficients, measurement windows, probe allowances ...) are marked hidden and served under
+`advanced` instead -- still settable, just not offered by the form. `test/test_route_opts.sh` fails
+if a literal default in either list drifts from the engine.
+
 Read-only endpoints (no key required): `/_health_status`, `/_active_conns`,
 `/_cluster_avg`, `/_route_state`, `/_route_debug?sid=…`, `/_route_inspect`,
 `/_ttft_status`, `/_tps_status`, `/_429_status`, `/_bodylog_status`,
-`/_reject_rules_status`.
+`/_reject_rules_status`, `/_route_opts`.
 
 Hot toggles (bound to 127.0.0.1) change behaviour without a reload:
 `/_ttft_toggle`, `/_ttft_limit`, `/_tps_toggle`, `/_tps_limit`, `/_bodylog_toggle`,

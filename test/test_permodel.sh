@@ -31,6 +31,7 @@ http {
   init_worker_by_lua_block {
     math.randomseed(ngx.now()*1000 + ngx.worker.pid())
     _G.TPS_BUCKETS = {5,10,20,40,80,150,300}
+    _G.ADAPTIVE_CC_HOLD_WHEN_IDLE = false   -- pinned: these checks predate the hold-when-idle default
     _G.TTFT_BUCKETS_MS = {50,100,200,300,500,800,1200}
     _G.register_route("pm", function() return {
       peers_by_model={["kimi-k2.6"]={{"127.0.0.1",28931,"k1"},{"127.0.0.1",28932,"k2"}},["glm-5.1-fp8"]={{"127.0.0.1",28933,"g1"}}},

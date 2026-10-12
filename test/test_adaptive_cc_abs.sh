@@ -31,6 +31,7 @@ http {
   init_worker_by_lua_block {
     math.randomseed(ngx.now()*1000 + ngx.worker.pid())
     _G.TPS_BUCKETS = {5,10,20,40,80,150,300}
+    _G.ADAPTIVE_CC_HOLD_WHEN_IDLE = false   -- pinned: these checks predate the hold-when-idle default
     _G.ADAPTIVE_CC_TTL = 30
     -- per-peer max=100 → 静态 max=200(不封顶,让 ABS/相对逻辑说话);min=2;interval=2s,inc=2,dec=0.5
     local peers = {{"127.0.0.1",28951,"m1",0,100},{"127.0.0.1",28952,"m2",0,100}}
