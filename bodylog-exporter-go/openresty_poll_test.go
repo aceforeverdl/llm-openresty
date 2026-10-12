@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -181,10 +182,61 @@ func TestPollUpIsPerRoute(t *testing.T) {
 	p := newORPoller(cfg, m, func() []string { return []string{"good", "bad"} }, nil)
 	p.pollOnce(context.Background())
 
-	if got := testutil.ToFloat64(m.pollUp.WithLabelValues("good")); got != 1 {
+	if got := testutil.ToFloat64(m.pollUp.WithLabelValues("unknown", "good")); got != 1 {
 		t.Errorf("openresty_poll_up{route=good} = %v, 想要 1(它自己是好的,不该被 bad 连累)", got)
 	}
-	if got := testutil.ToFloat64(m.pollUp.WithLabelValues("bad")); got != 0 {
+	if got := testutil.ToFloat64(m.pollUp.WithLabelValues("unknown", "bad")); got != 0 {
 		t.Errorf("openresty_poll_up{route=bad} = %v, 想要 0", got)
+	}
+}
+
+// Two openrestys each serving a route named "kimi-k3" (production next to a canary): each target is
+// polled on its own openresty and labelled with its own service. Before per-target polling, the one
+// polled openresty's data was labelled with whichever ModelRoute the route name happened to map to last.
+func TestPollerSameRouteOnTwoOpenrestys(t *testing.T) {
+	mk := func(ttftMs float64, rej float64) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/kimi-k3/_route_state":
+				_, _ = w.Write([]byte(`{"route":"kimi-k3","active_level":1,"limit":10,"healthy_peers_in_level":1,"by_priority":{}}`))
+			case "/kimi-k3/_tps_status":
+				_, _ = w.Write([]byte(`{"active":true}`))
+			case "/kimi-k3/_ttft_status":
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"active":true,"ewma_ms":{"_":%v}}`, ttftMs)))
+			case "/kimi-k3/_429_status":
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"by_route":{"kimi-k3":{"concurrency":%v}}}`, rej)))
+			default:
+				w.WriteHeader(404)
+			}
+		}))
+	}
+	prod, canary := mk(2300, 15), mk(106100, 585)
+	defer prod.Close()
+	defer canary.Close()
+
+	reg := prometheus.NewRegistry()
+	m := newORMetrics(reg)
+	cfg := orConfig{baseURL: prod.URL, interval: time.Second, timeout: 2 * time.Second}
+	p := newORPollerTargets(cfg, m, func() []pollTarget {
+		return []pollTarget{
+			{base: "", route: "kimi-k3", service: "kimi-k3/kimi-k3"}, // "" = OPENRESTY_POLL_URL (prod)
+			{base: canary.URL, route: "kimi-k3", service: "test-kimi-k3/k3-canary-experiment"},
+		}
+	})
+	p.pollOnce(context.Background())
+
+	for _, c := range []struct {
+		svc       string
+		ttft, rej float64
+	}{{"kimi-k3/kimi-k3", 2300, 15}, {"test-kimi-k3/k3-canary-experiment", 106100, 585}} {
+		if got := testutil.ToFloat64(m.ttftEwma.WithLabelValues(c.svc, "kimi-k3", "_")); got != c.ttft {
+			t.Errorf("ttft_ewma{service=%s} = %v, want %v", c.svc, got, c.ttft)
+		}
+		if got := testutil.ToFloat64(m.rejected.WithLabelValues(c.svc, "kimi-k3", "concurrency")); got != c.rej {
+			t.Errorf("rejected{service=%s,reason=concurrency} = %v, want %v (429 is per openresty)", c.svc, got, c.rej)
+		}
+		if got := testutil.ToFloat64(m.pollUp.WithLabelValues(c.svc, "kimi-k3")); got != 1 {
+			t.Errorf("poll_up{service=%s} = %v, want 1", c.svc, got)
+		}
 	}
 }

@@ -54,6 +54,14 @@ type podRouteResolver struct {
 	byIP   map[string]routeInfo // 后端 pod IP → {route, service}(富化用,含所有 route)
 	routes []string             // poll 用的 route 列表(按 nginxService 过滤 + 去重排序)
 	svc    map[string]string    // route → discovery.service(poll 打 service label 用,含所有 route)
+	// targets: what the openresty poller actually polls -- one per (openresty, route), each carrying
+	// the service label of the ModelRoute it came from. Keyed by openresty too, so ModelRoutes that
+	// share a route name on different openrestys (a canary next to production) no longer collide.
+	targets []pollTarget
+	// perService: poll the openresty each ModelRoute names in spec.nginx.service (true, default) instead
+	// of only the one in OPENRESTY_POLL_URL. pollPort: that openresty Service's dispatch port.
+	perService bool
+	pollPort   int
 
 	up              prometheus.Gauge
 	pods            prometheus.Gauge
@@ -93,6 +101,8 @@ func newPodRouteResolver(reg *prometheus.Registry) *podRouteResolver {
 		version:       envOr("MODELROUTE_VERSION", "v1alpha1"),
 		plural:        envOr("MODELROUTE_PLURAL", "modelroutes"),
 		nginxService:  strings.TrimSpace(envOr("OPENRESTY_SERVICE", "")),
+		perService:    envOr("OPENRESTY_POLL_PER_SERVICE", "true") != "false",
+		pollPort:      envOrInt("OPENRESTY_POLL_PORT", 8080),
 		interval:      interval,
 		timeout:       timeout,
 		apiBase:       apiBase,
@@ -120,6 +130,15 @@ func (r *podRouteResolver) getRoutes() []string {
 	defer r.mu.RUnlock()
 	out := make([]string, len(r.routes))
 	copy(out, r.routes)
+	return out
+}
+
+// getTargets: the (openresty, route, service) triples to poll, snapshot of the last refresh.
+func (r *podRouteResolver) getTargets() []pollTarget {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]pollTarget, len(r.targets))
+	copy(out, r.targets)
 	return out
 }
 
@@ -174,7 +193,7 @@ func (r *podRouteResolver) refresh(ctx context.Context) {
 	}
 	r.mu.Lock()
 	changed := !equalStrs(r.routes, res.routes)
-	r.byIP, r.routes, r.svc = res.byIP, res.routes, res.svc
+	r.byIP, r.routes, r.svc, r.targets = res.byIP, res.routes, res.svc, res.targets
 	r.mu.Unlock()
 	if changed { // route 增删时留个线索(排查某 route 何时上下线)
 		log.Printf("route-enrich: routes=%v", res.routes)
@@ -197,10 +216,19 @@ func (r *podRouteResolver) refresh(ctx context.Context) {
 
 // resolveResult:一轮 build 的产出。byIP/reps/svc 含所有 route;routes 是 poll 用(按 nginxService 过滤)。
 type resolveResult struct {
-	byIP   map[string]routeInfo
-	reps   []svcRep
-	routes []string
-	svc    map[string]string
+	byIP    map[string]routeInfo
+	reps    []svcRep
+	routes  []string
+	svc     map[string]string
+	targets []pollTarget
+}
+
+// pollTarget: one openresty route to poll. base = the openresty's URL ("" = OPENRESTY_POLL_URL);
+// service = the discovery.service label of the ModelRoute this target came from.
+type pollTarget struct {
+	base    string
+	route   string
+	service string
 }
 
 // modelRouteFull:投影 —— nginx.{route,service} + discovery.service + modelType。
@@ -297,6 +325,7 @@ func (r *podRouteResolver) build(ctx context.Context) (resolveResult, error) {
 	}
 	res := resolveResult{byIP: map[string]routeInfo{}, svc: map[string]string{}}
 	seen := map[string]bool{}
+	seenTarget := map[string]bool{}
 	// 同一轮内共享:多个 route 常指向同一组工作负载(如 cart 与推理服务同属一个 release),
 	// 上溯路径高度重合,缓存把 apiserver 的 GET 次数压到每个对象一次。
 	ownerCache := map[string]*ownerObj{}
@@ -319,6 +348,16 @@ func (r *podRouteResolver) build(ctx context.Context) (resolveResult, error) {
 			if !seen[route] {
 				seen[route] = true
 				res.routes = append(res.routes, route)
+			}
+			base := r.openrestyBase(it.Spec.Nginx.Service, it.Metadata.Namespace)
+			if k := base + "|" + route; !seenTarget[k] {
+				seenTarget[k] = true
+				res.targets = append(res.targets, pollTarget{base: base, route: route, service: svcLabel})
+			} else {
+				// The same route twice on one openresty: either per-service polling is off (every ModelRoute
+				// falls back to OPENRESTY_POLL_URL), or two ModelRoutes claim one route on one openresty, which
+				// autoconfig refuses (RouteKeyConflict). Either way one poll, labelled with the first seen.
+				log.Printf("route-enrich: route %q on %q comes from more than one ModelRoute; polled once, labelled %q", route, baseName(base), firstTargetService(res.targets, base, route))
 			}
 		}
 
@@ -567,6 +606,40 @@ func normalizeServiceLabel(svc string) string {
 }
 
 // splitNsName:"ns/name" → (ns, name);无 "/" 时 ns 回退 "default"。
+// openrestyBase: the URL of the openresty a ModelRoute is served by, from spec.nginx.service ("ns/name"
+// or "name" in the ModelRoute's namespace). "" = use OPENRESTY_POLL_URL (per-service polling off, or the
+// ModelRoute names no openresty).
+func (r *podRouteResolver) openrestyBase(nginxService, mrNamespace string) string {
+	s := strings.TrimSpace(nginxService)
+	if !r.perService || s == "" {
+		return ""
+	}
+	ns, name := mrNamespace, s
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		ns, name = s[:i], s[i+1:]
+	}
+	if name == "" || ns == "" {
+		return ""
+	}
+	return fmt.Sprintf("http://%s.%s.svc:%d", name, ns, r.pollPort)
+}
+
+func baseName(base string) string {
+	if base == "" {
+		return "OPENRESTY_POLL_URL"
+	}
+	return base
+}
+
+func firstTargetService(ts []pollTarget, base, route string) string {
+	for _, t := range ts {
+		if t.base == base && t.route == route {
+			return t.service
+		}
+	}
+	return ""
+}
+
 func splitNsName(s string) (ns, name string) {
 	if i := strings.IndexByte(s, '/'); i >= 0 {
 		return s[:i], s[i+1:]
