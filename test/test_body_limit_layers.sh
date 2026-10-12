@@ -23,9 +23,12 @@ command -v openresty >/dev/null || { echo "SKIP: 本机没有 openresty"; exit 0
 mkdir -p "$PREFIX"/{conf,logs,sock}
 
 # 从仓库里的实际配置取值(不写死,改了 conf 这个测试自动跟着变)
-limit_of() { grep -oE 'client_max_body_size[[:space:]]+[0-9]+[kKmMgG]?' "$1" | head -1 | awk '{print $2}'; }
-DISPATCH_LIMIT=$(limit_of session_base.conf)
-PERMODEL_LIMIT=$(limit_of router_locations.inc)
+# The per-model default now lives at http level in session_base.conf (column 0, outside any server);
+# the dispatch ceiling is the value inside the `listen 8080` server. Both are read from that one file,
+# and an empty read fails loudly instead of rendering `client_max_body_size ;`.
+PERMODEL_LIMIT=$(grep -E '^client_max_body_size[[:space:]]+[0-9]+[kKmMgG]?;' session_base.conf | head -1 | awk '{print $2}' | tr -d ';')
+DISPATCH_LIMIT=$(awk '/^server[[:space:]]*\{/{s=1; d=0} s && /listen 8080;/{d=1} s && d && /^[[:space:]]*client_max_body_size[[:space:]]+[0-9]/{print $2; exit} /^\}/{s=0}' session_base.conf | tr -d ';')
+[ -n "$PERMODEL_LIMIT" ] && [ -n "$DISPATCH_LIMIT" ] || { echo "FAIL: could not read the limits (per-model='$PERMODEL_LIMIT' dispatch='$DISPATCH_LIMIT')"; exit 1; }
 echo "取自仓库:dispatch=$DISPATCH_LIMIT  per-model=$PERMODEL_LIMIT"
 # 后端 mock:什么都回 200(用 nginx 自己起,免依赖)
 cat > "$PREFIX/conf/nginx.conf" <<EOF
