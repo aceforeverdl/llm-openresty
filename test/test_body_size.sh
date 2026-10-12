@@ -15,17 +15,17 @@ cleanup(){ "$OPENRESTY" -p "$PREFIX" -c nginx.conf -s stop 2>/dev/null; sleep 1;
 trap cleanup EXIT
 rm -rf "$PREFIX"; mkdir -p "$PREFIX/logs" "$PREFIX/temp" "$PREFIX/sock" "$PREFIX/conf.d/routes" "$PREFIX/conf.d/lua"
 
-# 真基座 + 真 router_locations + 真 lua(镜像布局:conf.d/*.conf + conf.d/routes/*.conf + conf.d/lua/)
-# listen unix: 要绝对路径 → 把 session_base 里的固定 sock 目录 sed 成本 harness 的 prefix/sock
+# The real base, router_locations.inc and lua, in the image layout (conf.d/*.conf + conf.d/routes/*.conf + conf.d/lua/).
+# `listen unix:` needs an absolute path: point session_base's fixed sock directory at this harness's prefix/sock.
 cp "$BASE/session_base.conf" "$PREFIX/conf.d/session_base.conf"
 sed -i "s#/usr/local/openresty/nginx/sock#$PREFIX/sock#g" "$PREFIX/conf.d/session_base.conf"
-# chat 上 live openresty 已占 8080/8090/1808x → 隔离测试全改高位端口(dispatch 8080→19080、health 8090→19090)
+# A live openresty on the test box may hold 8080/8090: move dispatch to 19780 and health to 19790.
 sed -i "s#listen 8080;#listen 19780;#; s#listen 8090;#listen 19790;#" "$PREFIX/conf.d/session_base.conf"
 cp "$BASE/router_locations.inc" "$PREFIX/conf.d/router_locations.inc"
 cp "$BASE/lua/"*.lua "$PREFIX/conf.d/lua/"
 cp -r "$BASE/vendor" "$PREFIX/vendor" 2>/dev/null
 
-# per-model conf(真 form):唯一相对现状的新增 = `listen unix:sock/<key>.sock;`(老端口保留 = 共存)
+# Per-route confs in the form autoconfig renders: a unix socket behind dispatch, plus the route's own directives.
 mkroute(){ local key="$1" mport="$2" extra="$3"
 cat > "$PREFIX/conf.d/routes/session_route_$key.conf" <<EOF
 lua_shared_dict active_conns_$key 4m; lua_shared_dict cluster_avg_$key 16k; lua_shared_dict lc_locks_$key 1m;
@@ -51,10 +51,10 @@ env BODYLOG_LISTENER_HOST=127.0.0.1; env BODYLOG_LISTENER_PORT=59999;
 events { worker_connections 2048; }
 http {
   access_log off; client_body_temp_path temp/cb; proxy_temp_path temp/p; fastcgi_temp_path temp/f; uwsgi_temp_path temp/u; scgi_temp_path temp/s;
-  log_format session_log escape=json '{"status":\$status,"sid":"\$routed_session_id","peer":"\$routed_peer"}';   # router_locations.inc 引用(内容不测)
+  log_format session_log escape=json '{"status":\$status,"sid":"\$routed_session_id","peer":"\$routed_peer"}';   # referenced by router_locations.inc (content not tested)
   lua_package_path '$PREFIX/conf.d/lua/?.lua;$PREFIX/vendor/?.lua;;';
-  include conf.d/*.conf;          # 真 session_base.conf(dicts+upstream+init+dispatch 8080+health 8090)
-  include conf.d/routes/*.conf;   # per-model(socket+老端口)
+  include conf.d/*.conf;          # the real session_base.conf (dicts, upstream, init, dispatch, health)
+  include conf.d/routes/*.conf;   # per-route servers (unix sockets)
 }
 EOF
 
