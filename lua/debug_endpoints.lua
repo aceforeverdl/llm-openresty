@@ -798,11 +798,20 @@ end
 -- GET /_route_opts — what the engine actually runs this route with.
 --   directives: the options an operator tunes, in the console deploy form's shape (lua/directives.lua)
 --               plus value (effective, after defaults and validation) and set (the route conf set it).
+--               fallback is the engine default as text, read now from route.DEFAULTS -- so it is what this
+--               host's session_base.conf gives, not a copy; derived defaults keep the catalog's words.
 --   advanced:   same shape, for engine internals the form does not offer (hidden in the catalog).
 --   adaptive_cc_derived: per sub-pool static max / floor / start point, as the timer computes them.
 -- Only catalog options are listed and peer lists are reduced to counts, which is what lets it be open
 -- like the other read-only status endpoints (the console reads the catalog from it).
 local directives = require "directives"
+local function fallback_text(d)
+    if route.DEFAULTS[d.key] == nil then return d.fallback end   -- derived ("the floor" ...)
+    local v = route.default_of(d.key)
+    if type(v) == "boolean" then return v and "on" or "off" end
+    if v == nil then return "unset" end
+    return tostring(v)
+end
 function _G.dbg_route_opts(opts)
     if util.opts_missing(opts) then return end
     ngx.header["Content-Type"] = "application/json"
@@ -811,7 +820,7 @@ function _G.dbg_route_opts(opts)
     for _, d in ipairs(directives.DIRECTIVES) do
         local v = opts[d.key]
         if d.key == "adaptive_cc" then v = opts.adaptive_cc and true or false end   -- off is stored as nil
-        local item = { key = d.key, label = d.label, group = d.group, kind = d.kind, fallback = d.fallback,
+        local item = { key = d.key, label = d.label, group = d.group, kind = d.kind, fallback = fallback_text(d),
                        detail = d.detail, needsAdaptive = d.needsAdaptive or false,
                        set = set_keys[d.key] == true }
         if v == nil then item.value = cjson_dbg.null else item.value = v end

@@ -1,6 +1,7 @@
 #!/bin/bash
 # /_route_opts isolated check: builds its own openresty + mocks, cleans up after itself.
-#   ① every literal catalog default equals the engine's effective value on a route that sets nothing;
+#   ① every catalog fallback equals the engine's effective value on a route that sets nothing; fallback
+#     is read from the engine (a changed global shows up), derived ones keep the catalog's words;
 #     catalog shape (16 operator directives + 24 advanced, groups, item fields)
 #   ② new defaults: hold_when_idle on, cross_tier_fallback off, derived init == min
 #   ③ strict boolean parsing: "False"/"no" read as false with a WARN, "maybe" falls back with an ERR,
@@ -43,6 +44,9 @@ cat <<'EOF'
     math.randomseed(ngx.now()*1000 + ngx.worker.pid())
     _G.TPS_BUCKETS = {5,10,20,40,80,150,300}
     -- No adaptive_cc globals pinned here: ① compares the catalog against the real engine defaults.
+    -- Two globals changed the way a host's own session_base.conf would: /_route_opts must show these,
+    -- not the repo values (20 / 300).
+    _G.TPS_LIMIT_TPS = 33; _G.ADAPTIVE_CC_TTL = 123
     local peers = {{"127.0.0.1",28991,"m1",0,100},{"127.0.0.1",28992,"m2",0,100}}   -- static max 200
     local dicts = {bodylog_default_enabled=false}   -- bodylog is not in the catalog; keep the mocks quiet
     local function R(x) local t={peers=peers} for k,v in pairs(dicts) do t[k]=v end for k,v in pairs(x) do t[k]=v end return t end
@@ -84,6 +88,7 @@ d = json.load(sys.stdin); bad = []; checked = 0
 for x in d["directives"] + d["advanced"]:
     f, v = x["fallback"], x["value"]
     if f in ("on", "off"): want = (f == "on")
+    elif f == "unset": want = None
     elif f.startswith("/"): want = f
     else:
         try: want = float(f)
@@ -93,7 +98,9 @@ for x in d["directives"] + d["advanced"]:
     if v != want or x["set"]: bad.append("%s: fallback=%s value=%s set=%s" % (x["key"], f, x["value"], x["set"]))
 print(checked, "|", "; ".join(bad))')
 n=${drift%% |*}; rest=${drift#*| }
-[ "$n" -ge 25 ] && [ -z "$rest" ] && ok "① $n literal catalog defaults match the engine" || no "① checked=$n drift: $rest"
+[ "$n" -eq 36 ] && [ -z "$rest" ] && ok "① $n catalog defaults match the engine" || no "① checked=$n (want 36) drift: $rest"
+[ "$(ro $PLAIN 'D["tps_limit_tps"]["fallback"], D["adaptive_cc_ttl"]["fallback"], D["tps_limit_tps"]["value"]')" = "('33', '123', 33)" ] && ok "① fallback follows the host's globals (33 / 123, not 20 / 300)" || no "① override: $(ro $PLAIN 'D["tps_limit_tps"]["fallback"], D["adaptive_cc_ttl"]["fallback"], D["tps_limit_tps"]["value"]')"
+[ "$(ro $PLAIN 'D["adaptive_cc_init"]["fallback"], D["adaptive_cc_interval"]["fallback"], all(isinstance(x.get("fallback"), str) and x["fallback"] for x in d["directives"]+d["advanced"])')" = "('the floor', 'the TPS window', True)" ] && ok "① derived defaults keep the catalog's words; every option has a fallback" || no "① derived: $(ro $PLAIN '[(x["key"], x.get("fallback")) for x in d["directives"]+d["advanced"] if not isinstance(x.get("fallback"), str) or x["key"] in ("adaptive_cc_init","adaptive_cc_interval")]')"
 [ "$(ro $PLAIN 'len(d["directives"]), len(d["advanced"])')" = "(16, 24)" ] && ok "① catalog served: 16 operator directives + 24 advanced" || no "① counts: $(ro $PLAIN 'len(d["directives"]), len(d["advanced"])')"
 [ "$(ro $PLAIN 'sorted({x["group"] for x in d["directives"]})')" = "['Adaptive concurrency', 'Capacity & failover', 'Observability', 'Routing', 'Thresholds']" ] && ok "① operator groups" || no "① groups: $(ro $PLAIN 'sorted({x["group"] for x in d["directives"]})')"
 [ "$(ro $PLAIN '"adaptive_cc_inc" in {x["key"] for x in d["advanced"]} and "adaptive_cc_inc" not in {x["key"] for x in d["directives"]}')" = "True" ] && ok "① internals listed under advanced, not directives" || no "① adaptive_cc_inc misplaced"
