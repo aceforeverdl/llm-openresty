@@ -3,7 +3,7 @@
 #   ① every catalog fallback equals the engine's effective value on a route that sets nothing; fallback
 #     is read from the engine (a changed global shows up), derived ones keep the catalog's words;
 #     catalog shape (16 operator directives + 24 advanced, groups, item fields)
-#   ② new defaults: hold_when_idle on, cross_tier_fallback off, derived init == min
+#   ② new defaults: hold_when_idle on, cross_tier_fallback on, derived init == min
 #   ③ strict boolean parsing: "False"/"no" read as false with a WARN, "maybe" falls back with an ERR,
 #     and the same for every other boolean option
 #   ④ init / init_frac outside [min, max] warns once at registration and is clamped
@@ -108,13 +108,13 @@ n=${drift%% |*}; rest=${drift#*| }
 
 # ② new defaults
 [ "$(ro $PLAIN 'D["adaptive_cc_hold_when_idle"]["value"], D["adaptive_cc_hold_when_idle"]["set"]')" = "(True, False)" ] && ok "② hold_when_idle defaults to on (not set by the route)" || no "② hold: $(ro $PLAIN 'D["adaptive_cc_hold_when_idle"]')"
-[ "$(ro $PLAIN 'D["cross_tier_fallback"]["value"]')" = "False" ] && ok "② cross_tier_fallback defaults to off" || no "② cross_tier: $(ro $PLAIN 'D["cross_tier_fallback"]["value"]')"
+[ "$(ro $PLAIN 'D["cross_tier_fallback"]["value"], D["cross_tier_fallback"]["fallback"]')" = "(True, 'on')" ] && ok "② cross_tier_fallback defaults to on" || no "② cross_tier: $(ro $PLAIN 'D["cross_tier_fallback"]["value"]')"
 [ "$(ro $PLAIN 'D["adaptive_cc_init"]["value"] is None and d["adaptive_cc_derived"]["_"] == {"static_max": 200, "min": 80, "init": 80}')" = "True" ] && ok "② no init: derived init == min (80 of 200)" || no "② derived: $(ro $PLAIN 'd["adaptive_cc_derived"]')"
 
 # ③ boolean parsing
 [ "$(ro $STRS 'D["cross_tier_fallback"]["value"], D["adaptive_cc_hold_when_idle"]["value"]')" = "(False, False)" ] && ok "③ \"False\" and \"no\" read as false" || no "③ strs: $(ro $STRS 'D["cross_tier_fallback"]["value"], D["adaptive_cc_hold_when_idle"]["value"]')"
 grep -q 'cross_tier_fallback=False (string) read as false' "$PREFIX/logs/error.log" && ok "③ WARN for the non-boolean \"False\"" || no "③ no WARN for \"False\""
-[ "$(ro $JUNK 'D["cross_tier_fallback"]["value"], D["adaptive_cc_hold_when_idle"]["value"]')" = "(False, True)" ] && ok "③ \"maybe\" -> defaults (cross_tier off, hold on)" || no "③ junk: $(ro $JUNK 'D["cross_tier_fallback"]["value"], D["adaptive_cc_hold_when_idle"]["value"]')"
+[ "$(ro $JUNK 'D["cross_tier_fallback"]["value"], D["adaptive_cc_hold_when_idle"]["value"]')" = "(True, True)" ] && ok "③ \"maybe\" -> defaults (cross_tier on, hold on)" || no "③ junk: $(ro $JUNK 'D["cross_tier_fallback"]["value"], D["adaptive_cc_hold_when_idle"]["value"]')"
 [ "$(grep -c 'is not a boolean - using the default' "$PREFIX/logs/error.log")" -ge 2 ] && ok "③ ERR for both unrecognised values" || no "③ ERR lines: $(grep -c 'is not a boolean' "$PREFIX/logs/error.log")"
 
 # ③ the other boolean options parse the same way (string "off"/"false"/"no" must not mean on)

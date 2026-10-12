@@ -261,7 +261,7 @@ function _G.do_route(opts)
     ngx.var.routed_mode = mode
     ngx.var.routed_peer = peer_key
 
-    -- fallback peers（active 升序）。默认仅同活跃层;opts.cross_tier_fallback 开时含【低优层】
+    -- fallback peers (ascending load). opts.cross_tier_fallback (on by default) adds the LOWER tiers; off = active tier only
     -- (高优层 5xx/连接失败 → proxy_next_upstream 单请求即刻兜到低优 VIP,不必等 health-timer ban，
     --  省掉 ~30s 空窗)。靠谱前提:高优层要能【快失败】——cart 已加短 connect_timeout,否则请求会
     --  先干等高优层挂 ~30s 再兜底、更糟(当初就是因此把跨层 fallback shelve 掉、等 cart 短超时)。
