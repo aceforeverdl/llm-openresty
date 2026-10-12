@@ -18,6 +18,32 @@
 `COPY ... TO ... (FORMAT parquet, COMPRESSION zstd)` 转 parquet,成功后删 jsonl。parquet 保留
 `BODYLOG_DETAILS_KEEP_DAYS` 天(默认 365)。
 
+## Retention
+
+All deletion of finished data happens in one place, `prune` (`retention.go`), run by a single
+goroutine every `BODYLOG_PRUNE_INTERVAL_SECONDS` and once at startup. `housekeep` only archives
+(tar a day dir, convert details to parquet, clear crashed temps) and deletes nothing by policy,
+so two deleters can never race over the same files (the shape of the 2026-09-15 data loss).
+
+Each pass deletes data when **either** condition is met:
+
+| Condition | Config | Default | What is deleted |
+|---|---|---|---|
+| Age | `BODYLOG_KEEP_DAYS` / `BODYLOG_DETAILS_KEEP_DAYS` | 90 / 365 days | archives / details older than N days |
+| Disk usage | `BODYLOG_DISK_USAGE_PCT` (`0` = off) | 90 | oldest data first, until the filesystem holding `BODYLOG_DIR` is below N% used (same formula as `df`) |
+| | `BODYLOG_PRUNE_INTERVAL_SECONDS` | 60 | how often a pass runs |
+
+Disk-usage order: history archives (`<date>.tar.gz`, legacy `<date>.jsonl.gz`) oldest first;
+only after every archive is gone, details (`metrics/details/<date>.parquet|.jsonl`) oldest
+first. Details are ~1000x smaller, so they are not sacrificed while an archive is left.
+
+Never deleted: day directories (today's, and yesterday's while it waits to be archived),
+archives in progress (`*.tar.gz.tmp-*`), today's details, and the per-minute aggregates in
+`metrics/`. If usage is still above the threshold after that, prune logs
+`prune: disk still N% used ...` and keeps the rest. It never touches files outside these
+patterns, so on a shared volume another tenant filling the disk costs bodylog its history but
+nothing else.
+
 ## HTTP 接口(端口 9998)
 
 **鉴权**:`BODYLOG_HTTP_TOKEN` 设置后,`/summary` 与 `/metrics` 需带 `Authorization: Bearer <token>`(或 `?token=<token>`),否则 401;`/healthz` 始终开放。**不设则不鉴权**(opt-in,向后兼容)。⚠️ 启用后调用方必须带 token —— 尤其 **monitor 拉 `/summary`** 要同步配上同一个 token(见 `monitor` 的 `BODYLOG_SUMMARY_URL`),否则 TPM/TTFT 断采。

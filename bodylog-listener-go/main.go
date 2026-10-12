@@ -12,7 +12,8 @@
 //   - 监听 TCP 9999（BODYLOG_HOST / BODYLOG_PORT 可覆盖）
 //   - 落盘 BODYLOG_DIR/YYYY-MM-DD/HH.jsonl（按天分目录、按小时切文件）
 //   - 跨日时：housekeep 把昨天目录整个 tar.gz → BODYLOG_DIR/YYYY-MM-DD.tar.gz，删原目录
-//   - keepDays 天后删历史 .tar.gz（默认 90，BODYLOG_KEEP_DAYS 可覆盖）
+//   - retention (retention.go, the only deleter of finished data): archives older than
+//     BODYLOG_KEEP_DAYS (default 90), or oldest-first while disk >= BODYLOG_DISK_USAGE_PCT (default 90)
 //   - 兼容迁移：BODYLOG_DIR 根上残留的旧版 .jsonl / .jsonl.gz 沿用旧 housekeep 逻辑
 //   - SIGTERM/SIGINT 优雅退出
 package main
@@ -123,7 +124,7 @@ func (w *hourWriter) write(p []byte) error {
 		w.hour = thisHour
 		log.Printf("opened %s", path)
 		if dayChanged {
-			// 跨日才需要触发 housekeep（昨天目录待打包 + keepDays cutoff）
+			// 跨日才需要触发 housekeep（昨天目录待打包）
 			go housekeep(w.dir)
 		}
 	}
@@ -694,10 +695,11 @@ func assembleEntry(metaJSON, req, resp []byte, sourceAddr string) (map[string]an
 
 // housekeep 扫描 BODYLOG_DIR，处理：
 //  1. YYYY-MM-DD/ 目录（非今日）→ tar.gz 整个目录 → 删原目录
-//  2. YYYY-MM-DD.tar.gz（≥ keepDays 天）→ 删
-//  3. .tar.gz.tmp / .tar.gz.tmp-XXXXXX 残留（上次崩溃没完成）→ 删
-//  4. （兼容）旧版 X.jsonl 在根目录 → gzip → 删原文件
-//  5. （兼容）旧版 X.jsonl.gz 在根目录（≥ keepDays 天）→ 删
+//  2. .tar.gz.tmp / .tar.gz.tmp-XXXXXX 残留（上次崩溃没完成）→ 删
+//  3. （兼容）旧版 X.jsonl 在根目录 → gzip → 删原文件
+//
+// Retention (deleting old archives by age or disk usage) is NOT done here: it lives in prune
+// (retention.go), the only code path that deletes finished data, so two deleters never race.
 //
 // ⚠️ **不可重入,必须串行**。原注释写的是「多次并发触发是安全的:每个目标都先 Stat 检查
 // dst 是否已存在再处理」—— 这句是错的,2026-09-15 因此丢了七天数据:
@@ -711,7 +713,6 @@ func housekeep(dir string) {
 	housekeepMu.Lock()
 	defer housekeepMu.Unlock()
 	today := time.Now().Format("2006-01-02")
-	cutoff := time.Now().AddDate(0, 0, -keepDays).Format("2006-01-02")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		log.Printf("housekeep readdir %s: %v", dir, err)
@@ -745,13 +746,6 @@ func housekeep(dir string) {
 			}
 			log.Printf("archived %s → %s", full, dst)
 
-		case !e.IsDir() && strings.HasSuffix(name, ".tar.gz"):
-			base := strings.TrimSuffix(name, ".tar.gz")
-			if isDateName(base) && base < cutoff {
-				_ = os.Remove(full)
-				log.Printf("removed old %s", name)
-			}
-
 		// ⚠️ 两种命名都要认:旧版是固定名 `<date>.tar.gz.tmp`,现在是 os.CreateTemp 的
 		// `<date>.tar.gz.tmp-XXXXXX`。只写 HasSuffix(".tar.gz.tmp") 的话新命名一个都匹配不上,
 		// 崩溃残留的临时文件(每个可能几十 GB)就永远清不掉 —— 等于把丢数据换成了磁盘泄漏。
@@ -778,28 +772,21 @@ func housekeep(dir string) {
 			}
 			_ = os.Remove(full)
 			log.Printf("compressed legacy %s → %s", full, dst)
-
-		case !e.IsDir() && strings.HasSuffix(name, ".jsonl.gz"):
-			base := strings.TrimSuffix(name, ".jsonl.gz")
-			if isDateName(base) && base < cutoff {
-				_ = os.Remove(full)
-				log.Printf("removed legacy old %s", name)
-			}
 		}
 	}
 
-	// metrics 明细：把封口的 <date>.jsonl 转 parquet + 清过期 parquet（与 housekeep 同节奏）
+	// metrics 明细：把封口的 <date>.jsonl 转 parquet（与 housekeep 同节奏）
 	rotateDetails(dir)
 }
 
 // rotateDetails 处理 BODYLOG_DIR/metrics/details/：
-//  1. 超过 detailsKeepDays 的 <date>.jsonl / <date>.parquet → 删（保留期裁剪，永远执行）
-//  2. 非今日且无同名 .parquet 的 <date>.jsonl → DuckDB COPY 转 zstd parquet，成功后删 jsonl
-//  3. <date>.parquet 已存在但 jsonl 还在（上次崩溃）→ 删多余 jsonl
+//  1. 非今日且无同名 .parquet 的 <date>.jsonl → DuckDB COPY 转 zstd parquet，成功后删 jsonl
+//  2. <date>.parquet 已存在但 jsonl 还在（上次崩溃）→ 删多余 jsonl
 //
-// duckDB 为 nil（go-duckdb 打开失败 / CGO_ENABLED=0 构建）时：跳过 parquet 转换(2)，
-// 当天 jsonl 仍在写、/metrics 因 duckDB nil 返回 503；但【保留期裁剪(1) 照常执行】，
-// 否则旧 jsonl 永不清理 → 无限增长撑爆磁盘（比改造前更糟的 outage）。
+// duckDB 为 nil（go-duckdb 打开失败 / CGO_ENABLED=0 构建）时：跳过 parquet 转换(1)，
+// 当天 jsonl 仍在写、/metrics 因 duckDB nil 返回 503。
+// Expired jsonl/parquet are deleted by prune (retention.go), which runs whether or not
+// duckDB is available, so unconverted jsonl still cannot grow without bound.
 func rotateDetails(dir string) {
 	ddir := filepath.Join(dir, "metrics", "details")
 	entries, err := os.ReadDir(ddir)
@@ -820,11 +807,8 @@ func rotateDetails(dir string) {
 				continue
 			}
 			jsonlPath := filepath.Join(ddir, name)
-			// 保留期裁剪：超期旧 jsonl 直接删（含 duckDB==nil 无法转 parquet 的场景，
-			// 否则 jsonl 永不清理 → 无限增长）。
+			// Already past retention: no point converting, prune will delete it.
 			if date < cutoff {
-				_ = os.Remove(jsonlPath)
-				log.Printf("details removed old %s", name)
 				continue
 			}
 			parquetPath := filepath.Join(ddir, date+".parquet")
@@ -832,7 +816,7 @@ func rotateDetails(dir string) {
 				_ = os.Remove(jsonlPath) // parquet 已在，清残留 jsonl
 				continue
 			}
-			// 转 parquet 需 duckDB；无 CGO 时保留 jsonl（已受上面 detailsKeepDays 上限约束）。
+			// Converting needs duckDB; without CGO the jsonl stays (prune still enforces detailsKeepDays).
 			if duckDB == nil {
 				continue
 			}
@@ -846,13 +830,6 @@ func rotateDetails(dir string) {
 			}
 			_ = os.Remove(jsonlPath)
 			log.Printf("details rotated %s → %s.parquet", name, date)
-
-		case strings.HasSuffix(name, ".parquet"):
-			date := strings.TrimSuffix(name, ".parquet")
-			if isDateName(date) && date < cutoff {
-				_ = os.Remove(filepath.Join(ddir, name))
-				log.Printf("details removed old %s", name)
-			}
 		}
 	}
 }
@@ -1644,6 +1621,13 @@ func main() {
 		log.Printf("HTTP auth: OFF — /summary + /metrics open (set BODYLOG_HTTP_TOKEN to enable)")
 	}
 	log.Printf("history archives retention: %d days (BODYLOG_KEEP_DAYS); details parquet retention: %d days (BODYLOG_DETAILS_KEEP_DAYS)", keepDays, detailsKeepDays)
+	diskUsagePct = envDiskUsagePct()
+	pruneInterval := time.Duration(envOrInt("BODYLOG_PRUNE_INTERVAL_SECONDS", defaultPruneInterval)) * time.Second
+	if diskUsagePct > 0 {
+		log.Printf("disk retention: delete oldest data while disk >= %d%% used (BODYLOG_DISK_USAGE_PCT); retention checked every %s", diskUsagePct, pruneInterval)
+	} else {
+		log.Printf("disk retention: OFF (BODYLOG_DISK_USAGE_PCT=0); retention checked every %s", pruneInterval)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		log.Fatalf("mkdir %s: %v", dir, err)
 	}
@@ -1721,7 +1705,11 @@ func main() {
 	//     17 分钟涨到 25~35 分钟后必然重叠 → 归档被写坏 + 源目录已删 = 永久丢数据。
 	//   · 启动时的一次:与"第一条写入"重复,而且两者会在启动后几毫秒内并发。
 	// 触发源收敛到一个,竞态从源头消失;housekeepMu 仍保留作为兜底。
-	// 保留期清理跟着跨日走:有流量就每天一次;没流量时也没有新数据要清。
+	// Retention no longer runs in housekeep: see runPrune below.
+
+	// Retention (age + disk usage) runs in this one goroutine and nowhere else; housekeep only
+	// archives. The two never touch the same files (see retention.go).
+	go runPrune(dir, pruneInterval, ctx.Done())
 
 	// 每 60s flush 一次：把 minute < now-90s 的 bucket 移到 archive 并写盘
 	go func() {
