@@ -1,36 +1,49 @@
 package main
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-// fakeDisk reports usage as (bytes under root) / capacity, so deleting a file lowers usage
-// the way it would on a real volume.
-func fakeDisk(t *testing.T, capacity int64) {
+// fakeDisk reports used = (bytes under root) + extra, total = capacity, so deleting a file
+// lowers usage the way it would on a real volume; extra stands for another tenant.
+func fakeDisk(t *testing.T, capacity, extra int64) {
 	t.Helper()
-	orig := diskUsage
-	diskUsage = func(root string) (float64, error) {
-		var total int64
+	orig := diskStat
+	diskStat = func(root string) (uint64, uint64, error) {
+		var used int64
 		err := filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
 			if err == nil && !info.IsDir() {
-				total += info.Size()
+				used += info.Size()
 			}
 			return err
 		})
-		return float64(total) * 100 / float64(capacity), err
+		return uint64(used + extra), uint64(capacity), err
 	}
-	t.Cleanup(func() { diskUsage = orig })
+	t.Cleanup(func() { diskStat = orig })
 }
 
-// setRetention sets the three knobs and restores them after the test.
+// heldDisk reports a fixed usage that deleting files never lowers: every deleted file is
+// still held open by some process, or the filesystem frees space asynchronously.
+func heldDisk(t *testing.T, used, capacity int64) {
+	t.Helper()
+	orig := diskStat
+	diskStat = func(string) (uint64, uint64, error) { return uint64(used), uint64(capacity), nil }
+	t.Cleanup(func() { diskStat = orig })
+}
+
 func setRetention(t *testing.T, pct, archiveDays, detailDays int) {
 	t.Helper()
 	p, a, d := diskUsagePct, keepDays, detailsKeepDays
 	diskUsagePct, keepDays, detailsKeepDays = pct, archiveDays, detailDays
-	t.Cleanup(func() { diskUsagePct, keepDays, detailsKeepDays = p, a, d })
+	lastDiskBatch, lastDiskWarn = time.Time{}, time.Time{}
+	t.Cleanup(func() {
+		diskUsagePct, keepDays, detailsKeepDays = p, a, d
+		lastDiskBatch, lastDiskWarn = time.Time{}, time.Time{}
+	})
 }
 
 func writeSize(t *testing.T, path string, size int) {
@@ -97,7 +110,7 @@ func check(t *testing.T, p map[string]string, gone, kept []string) {
 // not below, so a-5 goes too (60).
 func TestPruneDiskRemovesOldestUntilBelowThreshold(t *testing.T) {
 	root, p := mkLayout(t)
-	fakeDisk(t, 100*unit)
+	fakeDisk(t, 100*unit, 0)
 	setRetention(t, 70, 90, 365)
 	if n := prune(root); n != 2 {
 		t.Fatalf("removed %d files, want 2", n)
@@ -108,7 +121,7 @@ func TestPruneDiskRemovesOldestUntilBelowThreshold(t *testing.T) {
 
 func TestPruneBelowThresholdAndYoungIsNoop(t *testing.T) {
 	root, p := mkLayout(t)
-	fakeDisk(t, 1000*unit) // 8%
+	fakeDisk(t, 1000*unit, 0) // 8%
 	setRetention(t, 90, 90, 365)
 	if n := prune(root); n != 0 {
 		t.Fatalf("removed %d files", n)
@@ -118,7 +131,7 @@ func TestPruneBelowThresholdAndYoungIsNoop(t *testing.T) {
 
 func TestPruneDiskDisabled(t *testing.T) {
 	root, p := mkLayout(t)
-	fakeDisk(t, 80*unit) // 100%
+	fakeDisk(t, 80*unit, 0) // 100%
 	setRetention(t, 0, 90, 365)
 	if n := prune(root); n != 0 {
 		t.Fatalf("disk condition disabled but removed %d files", n)
@@ -130,7 +143,7 @@ func TestPruneDiskDisabled(t *testing.T) {
 // detailsKeepDays go, nothing else.
 func TestPruneAge(t *testing.T) {
 	root, p := mkLayout(t)
-	fakeDisk(t, 1000*unit)
+	fakeDisk(t, 1000*unit, 0)
 	setRetention(t, 90, 4, 20) // cutoff: archives before day(-4), details before day(-20)
 	prune(root)
 	check(t, p, []string{"legacy", "a-5", "det-30"},
@@ -141,7 +154,7 @@ func TestPruneAge(t *testing.T) {
 // a-4 (→ 50, not below) and a-3 (→ 40).
 func TestPruneAgeThenDisk(t *testing.T) {
 	root, p := mkLayout(t)
-	fakeDisk(t, 100*unit)
+	fakeDisk(t, 100*unit, 0)
 	setRetention(t, 50, 4, 365)
 	if n := prune(root); n != 4 {
 		t.Fatalf("removed %d files, want 4", n)
@@ -149,21 +162,80 @@ func TestPruneAgeThenDisk(t *testing.T) {
 	check(t, p, []string{"legacy", "a-5", "a-4", "a-3"}, []string{"a-2", "det-30"})
 }
 
-// When the disk cannot get below the threshold, every archive goes, then the details (except
-// today's), but day dirs, the archive in progress and unrelated files are never touched.
+// Deletable: 5 archives (50) + det-30 + det-1 (duckDB is nil in tests, so the jsonl is never
+// converted) = 52. Kept no matter what: 28. At 30% of 100 it takes 51 units: every archive and
+// det-30. Day dirs, the archive in progress and unrelated files are never touched.
 func TestPruneNeverTouchesLiveData(t *testing.T) {
 	root, p := mkLayout(t)
-	fakeDisk(t, 30*unit) // the kept files alone exceed the threshold
-	setRetention(t, 50, 90, 365)
+	fakeDisk(t, 100*unit, 0)
+	setRetention(t, 30, 90, 365)
 	prune(root)
-	check(t, p, []string{"legacy", "a-5", "a-4", "a-3", "a-2", "det-30", "det-1"},
+	check(t, p, []string{"legacy", "a-5", "a-4", "a-3", "a-2", "det-30"},
 		[]string{"tmp", "pending", "today", "det-0", "agg", "unrelate"})
+}
+
+// Review finding: re-measuring after each unlink wiped all history when the space did not
+// come back right away. The batch must be sized from file sizes (11 units needed → legacy
+// + a-5), and the next pass must not delete again while the cooldown runs.
+func TestPruneDiskSpaceNotReleased(t *testing.T) {
+	root, p := mkLayout(t)
+	heldDisk(t, 80*unit, 100*unit)
+	setRetention(t, 70, 90, 365)
+	if n := prune(root); n != 2 {
+		t.Fatalf("first pass removed %d files, want 2", n)
+	}
+	if n := prune(root); n != 0 {
+		t.Fatalf("second pass inside the cooldown removed %d files", n)
+	}
+	check(t, p, []string{"legacy", "a-5"}, []string{"a-4", "a-3", "a-2", "det-30"})
+}
+
+// Another tenant holds the disk: even deleting all 52 deletable units cannot get from 90% to
+// below 50% of 200, so nothing is deleted.
+func TestPruneDiskFullOfSomethingElse(t *testing.T) {
+	root, p := mkLayout(t)
+	fakeDisk(t, 200*unit, 100*unit)
+	setRetention(t, 50, 90, 365)
+	if n := prune(root); n != 0 {
+		t.Fatalf("removed %d files although it could not help", n)
+	}
+	check(t, p, nil, []string{"legacy", "a-5", "a-4", "a-3", "a-2", "det-30", "det-1"})
+}
+
+// Review finding: files housekeep may still be writing must never be candidates, for the
+// age rule as much as the disk rule.
+func TestPruneSkipsFilesHousekeepIsWriting(t *testing.T) {
+	root, p := mkLayout(t)
+	ddir := filepath.Join(root, "metrics", "details")
+	// legacy root jsonl not yet gzipped: its .jsonl.gz may be half written
+	writeSize(t, filepath.Join(root, day(-10)+".jsonl"), unit)
+	// parquet whose jsonl is still there: COPY may be writing it
+	p["det-2pq"] = filepath.Join(ddir, day(-2)+".parquet")
+	p["det-2js"] = filepath.Join(ddir, day(-2)+".jsonl")
+	writeSize(t, p["det-2pq"], unit)
+	writeSize(t, p["det-2js"], unit)
+
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := duckDB
+	duckDB = db // conversion is possible, so recent jsonl are rotateDetails' to handle
+	t.Cleanup(func() { duckDB = orig; db.Close() })
+
+	fakeDisk(t, 10*unit, 0)  // far above any threshold
+	setRetention(t, 1, 1, 1) // and everything is past retention
+	prune(root)
+	// det-2js is past the details cutoff, so rotateDetails skips it: deletable. det-1 is
+	// yesterday's, still to be converted: kept.
+	check(t, p, []string{"a-5", "det-30", "det-2js"},
+		[]string{"legacy", "det-2pq", "det-1", "today", "det-0"})
 }
 
 // Details are tiny; they must not be sacrificed while any archive is left, even if older.
 func TestPruneArchivesBeforeDetails(t *testing.T) {
 	root, p := mkLayout(t)
-	fakeDisk(t, 100*unit)
+	fakeDisk(t, 100*unit, 0)
 	setRetention(t, 75, 90, 365) // removing just the legacy archive (80 → 70) is enough
 	if n := prune(root); n != 1 {
 		t.Fatalf("removed %d files, want 1", n)
@@ -180,20 +252,25 @@ func TestHousekeepDoesNotPrune(t *testing.T) {
 	check(t, p, nil, []string{"legacy", "a-5", "det-30"})
 }
 
-func TestEnvDiskUsagePct(t *testing.T) {
+func TestEnvOrIntRange(t *testing.T) {
 	cases := map[string]int{"": 90, "0": 0, "80": 80, "99": 99, "100": 90, "-1": 90, "x": 90}
 	for v, want := range cases {
 		t.Setenv("BODYLOG_DISK_USAGE_PCT", v)
-		if got := envDiskUsagePct(); got != want {
+		if got := envOrIntRange("BODYLOG_DISK_USAGE_PCT", 90, 0, 99); got != want {
 			t.Errorf("BODYLOG_DISK_USAGE_PCT=%q: got %d, want %d", v, got, want)
 		}
 	}
+	// Review finding: a huge interval used to overflow time.Duration and panic NewTicker.
+	t.Setenv("BODYLOG_PRUNE_INTERVAL_SECONDS", "10000000000")
+	if got := envOrIntRange("BODYLOG_PRUNE_INTERVAL_SECONDS", 60, 1, maxPruneInterval); got != 60 {
+		t.Errorf("huge interval accepted: %d", got)
+	}
 }
 
-// The real statfs path must return a sane percentage on the test machine.
-func TestStatfsUsage(t *testing.T) {
-	u, err := statfsUsage(t.TempDir())
-	if err != nil || u < 0 || u > 100 {
-		t.Fatalf("statfsUsage = %v, %v", u, err)
+// The real statfs path must return sane numbers on the test machine.
+func TestStatfsBytes(t *testing.T) {
+	used, total, err := statfsBytes(t.TempDir())
+	if err != nil || total == 0 || used > total {
+		t.Fatalf("statfsBytes = %d, %d, %v", used, total, err)
 	}
 }

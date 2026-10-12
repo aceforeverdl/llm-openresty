@@ -1604,6 +1604,19 @@ func envOrInt(k string, dflt int) int {
 	return dflt
 }
 
+// envOrIntRange reads an int env var in [lo, hi]; anything else falls back to dflt with a
+// warning. Unlike envOrInt it can accept 0 (e.g. "0 = off") and caps values that would
+// overflow when turned into a Duration.
+func envOrIntRange(k string, dflt, lo, hi int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= lo && n <= hi {
+			return n
+		}
+		log.Printf("invalid %s=%q (need int in [%d, %d]), using default %d", k, v, lo, hi, dflt)
+	}
+	return dflt
+}
+
 // 编译期防止 unused import
 var _ = bytes.Buffer{}
 
@@ -1621,8 +1634,8 @@ func main() {
 		log.Printf("HTTP auth: OFF — /summary + /metrics open (set BODYLOG_HTTP_TOKEN to enable)")
 	}
 	log.Printf("history archives retention: %d days (BODYLOG_KEEP_DAYS); details parquet retention: %d days (BODYLOG_DETAILS_KEEP_DAYS)", keepDays, detailsKeepDays)
-	diskUsagePct = envDiskUsagePct()
-	pruneInterval := time.Duration(envOrInt("BODYLOG_PRUNE_INTERVAL_SECONDS", defaultPruneInterval)) * time.Second
+	diskUsagePct = envOrIntRange("BODYLOG_DISK_USAGE_PCT", defaultDiskUsagePct, 0, 99)
+	pruneInterval := time.Duration(envOrIntRange("BODYLOG_PRUNE_INTERVAL_SECONDS", defaultPruneInterval, 1, maxPruneInterval)) * time.Second
 	if diskUsagePct > 0 {
 		log.Printf("disk retention: delete oldest data while disk >= %d%% used (BODYLOG_DISK_USAGE_PCT); retention checked every %s", diskUsagePct, pruneInterval)
 	} else {

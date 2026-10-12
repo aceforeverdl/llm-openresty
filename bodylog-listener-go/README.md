@@ -33,16 +33,20 @@ Each pass deletes data when **either** condition is met:
 | Disk usage | `BODYLOG_DISK_USAGE_PCT` (`0` = off) | 90 | oldest data first, until the filesystem holding `BODYLOG_DIR` is below N% used (same formula as `df`) |
 | | `BODYLOG_PRUNE_INTERVAL_SECONDS` | 60 | how often a pass runs |
 
-Disk-usage order: history archives (`<date>.tar.gz`, legacy `<date>.jsonl.gz`) oldest first;
-only after every archive is gone, details (`metrics/details/<date>.parquet|.jsonl`) oldest
-first. Details are ~1000x smaller, so they are not sacrificed while an archive is left.
+Disk-usage step: if usage is at or above the threshold, it deletes the oldest data, **just enough
+bytes by file size** to get below it: history archives (`<date>.tar.gz`, legacy `<date>.jsonl.gz`)
+first, details (`metrics/details/`, ~1000x smaller) only once no archive is left. It does not
+re-measure after each delete (space held by an open file or freed asynchronously would make it
+delete everything), and after a batch it waits 10 minutes before deleting for disk pressure again.
+If even deleting every candidate could not get below the threshold, it deletes **nothing** and
+logs `prune: disk N% used ... deleting nothing` (at most once an hour): the disk is full of
+something else, and wiping bodylog history would not fix it.
 
 Never deleted: day directories (today's, and yesterday's while it waits to be archived),
-archives in progress (`*.tar.gz.tmp-*`), today's details, and the per-minute aggregates in
-`metrics/`. If usage is still above the threshold after that, prune logs
-`prune: disk still N% used ...` and keeps the rest. It never touches files outside these
-patterns, so on a shared volume another tenant filling the disk costs bodylog its history but
-nothing else.
+archives in progress (`*.tar.gz.tmp-*`), a legacy `<date>.jsonl.gz` while its `<date>.jsonl` still
+exists, details that `rotateDetails` may still convert (a jsonl inside the retention window
+while DuckDB is available, a parquet whose jsonl still exists), today's details, and the
+per-minute aggregates in `metrics/`. Retention and archiving therefore never touch the same file.
 
 ## HTTP 接口(端口 9998)
 
