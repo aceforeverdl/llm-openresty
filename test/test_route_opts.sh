@@ -6,7 +6,7 @@
 #   ③ strict boolean parsing: "False"/"no" read as false with a WARN, "maybe" falls back with an ERR,
 #     and the same for every other boolean option
 #   ④ init / init_frac outside [min, max] warns once at registration and is clamped
-#   ⑤ set flags, redaction of secret-looking keys, peers reduced to counts
+#   ⑤ set flags, only catalog options listed, peers reduced to counts
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ENGINE="${ENGINE:-$HERE/../session_base.conf}"; MOCK="${MOCK:-$HERE/mock_vllm_sse.py}"
@@ -112,8 +112,9 @@ grep -q 'cross_tier_fallback=False (string) read as false' "$PREFIX/logs/error.l
 
 # ③ the other boolean options parse the same way (string "off"/"false"/"no" must not mean on)
 [ "$(ro $BOOLS 'D["adaptive_cc"]["value"], D["session_affinity_enabled"]["value"], D["expose_routed_peer"]["value"]')" = "(False, False, True)" ] && ok "③ adaptive_cc \"off\" -> off, session_affinity \"false\" -> off, expose_routed_peer \"on\" -> on" || no "③ bools: $(ro $BOOLS 'D["adaptive_cc"]["value"], D["session_affinity_enabled"]["value"], D["expose_routed_peer"]["value"]')"
-[ "$(ro $BOOLS 'd["other_options"].get("bodylog_default_enabled"), d["other_options"].get("ttft_429_default_enabled"), d.get("adaptive_cc_derived")')" = "(False, False, None)" ] && ok "③ bodylog \"no\" and ttft_429 \"False\" -> off; adaptive off has no derived bounds" || no "③ bools other: $(ro $BOOLS 'd["other_options"].get("bodylog_default_enabled"), d["other_options"].get("ttft_429_default_enabled"), d.get("adaptive_cc_derived")')"
-[ "$(ro $PLAIN 'd["other_options"].get("ttft_429_default_enabled"), d["other_options"].get("bodylog_default_enabled")')" = "(True, False)" ] && ok "③ unset ttft_429_default_enabled is now an explicit true" || no "③ plain: $(ro $PLAIN 'd["other_options"].get("ttft_429_default_enabled"), d["other_options"].get("bodylog_default_enabled")')"
+# bodylog_default_enabled / ttft_429_default_enabled are not in the catalog: the WARN carries the parsed value
+grep -q '\[bools\] bodylog_default_enabled=no (string) read as false' "$PREFIX/logs/error.log" && grep -q '\[bools\] ttft_429_default_enabled=False (string) read as false' "$PREFIX/logs/error.log" && ok "③ bodylog \"no\" and ttft_429 \"False\" read as false" || no "③ no WARN for bodylog/ttft_429 strings"
+[ "$(ro $BOOLS 'd.get("adaptive_cc_derived")')" = "None" ] && ok "③ adaptive off has no derived bounds" || no "③ bools derived: $(ro $BOOLS 'd.get("adaptive_cc_derived")')"
 
 # ④ init outside [min, max]
 grep -q '\[strs\] adaptive_cc_init_frac=0.1 gives 20, outside \[min 80, max 200\] - effective init is 80' "$PREFIX/logs/error.log" && ok "④ WARN: init_frac below the floor" || no "④ no WARN for init_frac below min"
@@ -123,8 +124,8 @@ grep -q '\[junk\] adaptive_cc_init=500 gives 500, outside \[min 80, max 200\] - 
 
 # ⑤ set flags, redaction, peers
 [ "$(ro $STRS 'D["max_more_tries"]["value"], D["max_more_tries"]["set"], D["tps_window"]["set"]')" = "(3, True, False)" ] && ok "⑤ set flags (max_more_tries set, tps_window default)" || no "⑤ set: $(ro $STRS 'D["max_more_tries"], D["tps_window"]["set"]')"
-[ "$(ro $PLAIN 'd["other_options"].get("api_keys_dict")')" = "<redacted>" ] && ok "⑤ secret-looking option redacted" || no "⑤ api_keys_dict: $(ro $PLAIN 'd["other_options"].get("api_keys_dict")')"
-[ "$(ro $PLAIN 'd["peers"], "peers" in d["other_options"]')" = "({'count': 2}, False)" ] && ok "⑤ peers reduced to a count" || no "⑤ peers: $(ro $PLAIN 'd["peers"]')"
+[ "$(ro $PLAIN 'sorted(d)')" = "['adaptive_cc_derived', 'advanced', 'directives', 'peers', 'route']" ] && ok "⑤ only catalog options, peers and derived bounds (no other_options)" || no "⑤ top-level keys: $(ro $PLAIN 'sorted(d)')"
+[ "$(ro $PLAIN 'd["peers"]')" = "{'count': 2}" ] && ok "⑤ peers reduced to a count" || no "⑤ peers: $(ro $PLAIN 'd["peers"]')"
 
 echo "==== result: PASS=$P FAIL=$F ===="
 [ "$F" -eq 0 ] && echo "ALL GOOD" || echo "HAS FAILURES"

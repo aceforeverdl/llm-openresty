@@ -799,24 +799,16 @@ end
 --   directives: the options an operator tunes, in the console deploy form's shape (lua/directives.lua)
 --               plus value (effective, after defaults and validation) and set (the route conf set it).
 --   advanced:   same shape, for engine internals the form does not offer (hidden in the catalog).
---   other_options: remaining scalar options, not in the catalog (dict names, toggles' defaults ...).
 --   adaptive_cc_derived: per sub-pool static max / floor / start point, as the timer computes them.
--- Values whose key looks secret are redacted and peer lists reduced to counts, which is what lets it be
--- open like the other read-only status endpoints (the console reads the catalog from it).
+-- Only catalog options are listed and peer lists are reduced to counts, which is what lets it be open
+-- like the other read-only status endpoints (the console reads the catalog from it).
 local directives = require "directives"
-local function looks_secret(k)
-    k = k:lower()
-    return k:find("key", 1, true) or k:find("token", 1, true) or k:find("secret", 1, true)
-        or k:find("password", 1, true) or k:find("auth", 1, true)
-end
 function _G.dbg_route_opts(opts)
     if util.opts_missing(opts) then return end
     ngx.header["Content-Type"] = "application/json"
     local set_keys = opts._set_keys or {}
-    local in_catalog = {}
     local list, advanced = {}, {}
     for _, d in ipairs(directives.DIRECTIVES) do
-        in_catalog[d.key] = true
         local v = opts[d.key]
         if d.key == "adaptive_cc" then v = opts.adaptive_cc and true or false end   -- off is stored as nil
         local item = { key = d.key, label = d.label, group = d.group, kind = d.kind, fallback = d.fallback,
@@ -824,14 +816,6 @@ function _G.dbg_route_opts(opts)
                        set = set_keys[d.key] == true }
         if v == nil then item.value = cjson_dbg.null else item.value = v end
         if d.hidden then advanced[#advanced + 1] = item else list[#list + 1] = item end
-    end
-    local other = {}
-    for k, v in pairs(opts) do
-        local t = type(v)
-        if type(k) == "string" and not in_catalog[k] and k:sub(1, 1) ~= "_"
-           and (t == "string" or t == "number" or t == "boolean") then
-            other[k] = (looks_secret(k) and t ~= "boolean") and "<redacted>" or v
-        end
     end
     local derived
     if opts.adaptive_cc then
@@ -852,7 +836,7 @@ function _G.dbg_route_opts(opts)
         peers.by_model = {}
         for m, l in pairs(opts.peers_by_model) do peers.by_model[m] = #l end
     end
-    ngx.say(cjson_dbg.encode({ route = opts.route_name, directives = list, advanced = advanced, other_options = other,
+    ngx.say(cjson_dbg.encode({ route = opts.route_name, directives = list, advanced = advanced,
                                peers = peers, adaptive_cc_derived = derived }))
 end
 
