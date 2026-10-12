@@ -31,7 +31,7 @@ Each pass deletes data when **either** condition is met:
 |---|---|---|---|
 | Age | `BODYLOG_KEEP_DAYS` / `BODYLOG_DETAILS_KEEP_DAYS` | 90 / 365 days | archives / details older than N days |
 | Disk usage | `BODYLOG_DISK_USAGE_PCT` (`0` = off) | 90 | oldest data first, until the filesystem holding `BODYLOG_DIR` is below N% used (same formula as `df`) |
-| | `BODYLOG_PRUNE_INTERVAL_SECONDS` | 60 | how often a pass runs |
+| | `BODYLOG_PRUNE_INTERVAL_SECONDS` | 3600 | how often a pass runs (the 10 minute disk cooldown only matters if this is set lower) |
 
 Disk-usage step: if usage is at or above the threshold, it deletes the oldest data, **just enough
 bytes by file size** to get below it: history archives (`<date>.tar.gz`, legacy `<date>.jsonl.gz`)

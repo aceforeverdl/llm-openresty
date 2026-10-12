@@ -49,8 +49,8 @@ import (
 )
 
 const (
-	defaultDiskUsagePct  = 90 // BODYLOG_DISK_USAGE_PCT; 0 disables the disk condition
-	defaultPruneInterval = 60 // seconds, BODYLOG_PRUNE_INTERVAL_SECONDS
+	defaultDiskUsagePct  = 90   // BODYLOG_DISK_USAGE_PCT; 0 disables the disk condition
+	defaultPruneInterval = 3600 // seconds, BODYLOG_PRUNE_INTERVAL_SECONDS
 	maxPruneInterval     = 86400
 
 	// diskCooldown: after a disk-driven batch, wait this long before deleting for disk
