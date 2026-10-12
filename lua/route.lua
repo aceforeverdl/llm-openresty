@@ -271,8 +271,10 @@ function _G.register_route(name, opts_factory)
     -- Hold cc when traffic is low or absent: skips the slack shrink and writes cc without a TTL, so
     -- neither a trickle nor a long idle lowers it. Growth (pressure / 429s) and overload shrink are
     -- unchanged. Default comes from _G.ADAPTIVE_CC_HOLD_WHEN_IDLE (true); a route turns it off with
-    -- adaptive_cc_hold_when_idle = false.
-    util.bool_opt(opts, "adaptive_cc_hold_when_idle", _G.ADAPTIVE_CC_HOLD_WHEN_IDLE == true, name)
+    -- adaptive_cc_hold_when_idle = false. `~= false`, not `== true`: a session_base.conf older than
+    -- this default has no such global (nil), and the default must still be on there -- only an
+    -- explicit false turns it off.
+    util.bool_opt(opts, "adaptive_cc_hold_when_idle", _G.ADAPTIVE_CC_HOLD_WHEN_IDLE ~= false, name)
     -- TTFT also judges the AIMD limit unless the route says false. Normalised so the effective value
     -- is a boolean (it used to stay nil = on) and a string "False" means off rather than truthy-on.
     util.bool_opt(opts, "adaptive_cc_use_ttft", true, name)

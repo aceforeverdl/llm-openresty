@@ -1,14 +1,12 @@
 #!/bin/bash
-# adaptive_cc_hold_when_idle isolated check: builds its own openresty + mocks, cleans up after itself.
-# With the switch on, low or absent traffic never lowers cc: no slack shrink and cc never expires.
-# Growth under pressure and overload shrink are unchanged. The ctl route (switch off) runs the same
-# load side by side, so every "held" assertion has a control that does move.
-#   ① /_tps_status reports the switch (on / off / invalid string → off, logged)
-#   ② fresh pool still starts at min (hold does not change the start point)
-#   ③ high load raises cc on both routes (hold does not block growth)
-#   ④ light load: hold keeps its peak, ctl shrinks
-#   ⑤ full idle past both TTLs: hold keeps its value, ctl expires
-#   ⑥ overload still shrinks the held route
+# /_route_opts isolated check: builds its own openresty + mocks, cleans up after itself.
+#   ① every literal catalog default equals the engine's effective value on a route that sets nothing;
+#     catalog shape (16 operator directives + 24 advanced, groups, item fields)
+#   ② new defaults: hold_when_idle on, cross_tier_fallback off, derived init == min
+#   ③ strict boolean parsing: "False"/"no" read as false with a WARN, "maybe" falls back with an ERR,
+#     and the same for every other boolean option
+#   ④ init / init_frac outside [min, max] warns once at registration and is clamped
+#   ⑤ set flags, redaction of secret-looking keys, peers reduced to counts
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ENGINE="${ENGINE:-$HERE/../session_base.conf}"; MOCK="${MOCK:-$HERE/mock_vllm_sse.py}"
@@ -76,18 +74,6 @@ sleep 3; "$OPENRESTY" -p "$PREFIX" -c "$PREFIX/nginx.conf"; sleep 2
 P=0; F=0; ok(){ echo "  ✓ $1"; P=$((P+1)); }; no(){ echo "  ✗ FAIL: $1"; F=$((F+1)); }
 H="Content-Type: application/json"; A="Authorization: Bearer $KEY"
 PLAIN=http://127.0.0.1:19760; STRS=http://127.0.0.1:19761; JUNK=http://127.0.0.1:19762; BOOLS=http://127.0.0.1:19763
-body(){ echo "{\"stream_options\":{\"include_usage\":true},\"model\":\"x\",\"stream\":true,\"chunk_delay_ms\":$1,\"max_tokens\":$2,\"prefill_delay_ms\":15,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"; }
-fire(){ curl -s -o /dev/null -N -H "$A" -H "$H" -d "$(body $2 $3)" "$1/v1/chat/completions"; }
-# keep ~n overlapping requests for dur seconds (chunk ms x tokens per request)
-load_n(){ local u=$1 n=$2 dur=$3 ck=${4:-12} tk=${5:-100}; local endt=$((SECONDS+dur))
-  while [ "$SECONDS" -lt "$endt" ]; do for i in $(seq 1 $n); do fire "$u" $ck $tk >/dev/null 2>&1 & done; sleep 0.8; done; wait; }
-# fire n simultaneous long requests (12ms x 300 = ~3.6s each) and print how many got 200
-burst_ok(){ local u=$1 n=$2 d="$PREFIX/burst_$RANDOM"; mkdir -p "$d"
-  for i in $(seq 1 $n); do ( curl -s -o /dev/null -N -w '%{http_code}\n' -H "$A" -H "$H" -d "$(body 12 300)" "$u/v1/chat/completions" > "$d/$i" ) & done
-  wait; cat "$d"/* | grep -c '^200$'; }
-fv(){ curl -s "$1/_tps_status" | python3 -c "import sys,json;d=json.load(sys.stdin);v=d.get('$2');print(v.get('_') if isinstance(v,dict) else v)"; }
-num(){ [ "$1" = "None" ] && echo -1 || echo "$1"; }
-
 # ro <url> <python expr over d (decoded /_route_opts) and D (directives + advanced, by key)>
 ro(){ curl -s "$1/_route_opts" | python3 -c "import sys,json;d=json.load(sys.stdin);D={x['key']:x for x in d['directives']+d['advanced']};r=($2);print(r if isinstance(r,tuple) else r)"; }
 echo "########## /_route_opts ##########"
