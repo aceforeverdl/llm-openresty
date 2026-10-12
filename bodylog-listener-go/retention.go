@@ -202,9 +202,12 @@ func prune(dir string) int {
 	archiveCutoff := time.Now().AddDate(0, 0, -keepDays).Format("2006-01-02")
 	detailsCutoff := time.Now().AddDate(0, 0, -detailsKeepDays).Format("2006-01-02")
 	var left []pruneCandidate
+	var ageFreed uint64
 	for _, c := range pruneCandidates(dir, detailsCutoff) {
 		if (!c.details && c.date < archiveCutoff) || (c.details && c.date < detailsCutoff) {
-			remove(c, "older than retention days")
+			if remove(c, "older than retention days") {
+				ageFreed += uint64(c.size)
+			}
 			continue
 		}
 		left = append(left, c)
@@ -218,6 +221,15 @@ func prune(dir string) int {
 	if err != nil || total == 0 {
 		log.Printf("prune: statfs %s: %v", dir, err)
 		return removed
+	}
+	// Space from the age step may not be visible yet: some filesystems release a large
+	// unlinked file in the background (measured on XFS: 45 GiB deleted, statfs unchanged a
+	// millisecond later). Count it as freed; if statfs already saw it, this under-deletes,
+	// and the next pass catches up.
+	if ageFreed >= used {
+		used = 0
+	} else {
+		used -= ageFreed
 	}
 	// Largest used size that is below the threshold.
 	limit := total * uint64(diskUsagePct) / 100

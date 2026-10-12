@@ -38,6 +38,8 @@ bytes by file size** to get below it: history archives (`<date>.tar.gz`, legacy 
 first, details (`metrics/details/`, ~1000x smaller) only once no archive is left. It does not
 re-measure after each delete (space held by an open file or freed asynchronously would make it
 delete everything), and after a batch it waits 10 minutes before deleting for disk pressure again.
+Bytes deleted by the age step in the same pass are counted as already freed (on XFS a large
+unlinked file is released in the background, so statfs right after can still show it).
 If even deleting every candidate could not get below the threshold, it deletes **nothing** and
 logs `prune: disk N% used ... deleting nothing` (at most once an hour): the disk is full of
 something else, and wiping bodylog history would not fix it.

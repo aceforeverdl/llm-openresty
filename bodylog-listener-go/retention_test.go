@@ -150,14 +150,19 @@ func TestPruneAge(t *testing.T) {
 		[]string{"a-4", "a-3", "a-2", "tmp", "pending", "today", "det-1", "det-0", "agg", "unrelate"})
 }
 
-// Both conditions in one pass: age removes legacy + a-5 (80 → 60), disk at 55% then removes
-// a-4 (→ 50, not below) and a-3 (→ 40).
+// Age then disk. Age removes legacy + a-5 (80 → 60). On this filesystem the space shows up
+// at once, so subtracting the age step's bytes again (60 - 20 = 40 < 50) makes the disk step
+// skip this pass: a deliberate under-delete, the safe direction. The next pass sees 60 and
+// removes a-4 (→ 50, not below) and a-3 (→ 40).
 func TestPruneAgeThenDisk(t *testing.T) {
 	root, p := mkLayout(t)
 	fakeDisk(t, 100*unit, 0)
 	setRetention(t, 50, 4, 365)
-	if n := prune(root); n != 4 {
-		t.Fatalf("removed %d files, want 4", n)
+	if n := prune(root); n != 2 {
+		t.Fatalf("first pass removed %d files, want 2 (age only)", n)
+	}
+	if n := prune(root); n != 2 {
+		t.Fatalf("second pass removed %d files, want 2 (disk)", n)
 	}
 	check(t, p, []string{"legacy", "a-5", "a-4", "a-3"}, []string{"a-2", "det-30"})
 }
@@ -188,6 +193,19 @@ func TestPruneDiskSpaceNotReleased(t *testing.T) {
 		t.Fatalf("second pass inside the cooldown removed %d files", n)
 	}
 	check(t, p, []string{"legacy", "a-5"}, []string{"a-4", "a-3", "a-2", "det-30"})
+}
+
+// Found on the test cluster: space from the age step was not visible to statfs yet. Age
+// deletes legacy + a-5 (20 units) while the disk still reports 80 of 100; at a 65% threshold
+// that is 60 effective, already below: the disk step must not delete a-4 on stale numbers.
+func TestPruneAgeFreedCountsBeforeDiskStep(t *testing.T) {
+	root, p := mkLayout(t)
+	heldDisk(t, 80*unit, 100*unit)
+	setRetention(t, 65, 4, 365)
+	if n := prune(root); n != 2 {
+		t.Fatalf("removed %d files, want 2 (age only)", n)
+	}
+	check(t, p, []string{"legacy", "a-5"}, []string{"a-4", "a-3", "a-2"})
 }
 
 // Another tenant holds the disk: even deleting all 52 deletable units cannot get from 90% to
