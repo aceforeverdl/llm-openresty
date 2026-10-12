@@ -209,7 +209,7 @@ function _G.register_route(name, opts_factory)
     opts.rt_limit_factor           = opts.rt_limit_factor           or D("rt_limit_factor")
     if type(opts.rt_limit_factor) ~= "number" or opts.rt_limit_factor <= 0 then
         ngx.log(ngx.ERR, "[", name, "] rt_limit_factor=", tostring(opts.rt_limit_factor),
-                " 非法(需正数)— 回退 ", D("rt_limit_factor"))
+                " is invalid (need a positive number) - falling back to ", D("rt_limit_factor"))
         opts.rt_limit_factor = D("rt_limit_factor")
     end
     util.bool_opt(opts, "cch_default_enabled", _G.CCH_STRIP_DEFAULT_ENABLED == true, name)
@@ -223,7 +223,7 @@ function _G.register_route(name, opts_factory)
     util.bool_opt(opts, "session_affinity_enabled", D("session_affinity_enabled"), name)
     opts.health_check_interval     = opts.health_check_interval     or D("health_check_interval")
     opts.health_ban_ttl            = opts.health_ban_ttl            or D("health_ban_ttl")
-    opts.health_probe_path         = opts.health_probe_path         or D("health_probe_path")  -- 健康探针 GET 的路径,per-route 可配(后端探测接口不同的路由可覆盖)
+    opts.health_probe_path         = opts.health_probe_path         or D("health_probe_path")  -- path the health probe GETs; per route, for backends whose probe endpoint differs
     opts.cluster_avg_interval      = opts.cluster_avg_interval      or D("cluster_avg_interval")
     -- ── 跨层单请求 fallback(默认关)──
     -- cross_tier_fallback:开时高优层 5xx/连接失败即刻兜到低优层代表(不等 health-timer ban)。
@@ -236,7 +236,7 @@ function _G.register_route(name, opts_factory)
         opts.max_more_tries = D("max_more_tries")
     elseif mmt < 1 or mmt ~= math.floor(mmt) then
         ngx.log(ngx.ERR, "[", name, "] max_more_tries=", tostring(opts.max_more_tries),
-                " 非法(需 >=1 整数)— 回退 ", D("max_more_tries"))
+                " is invalid (need an integer >= 1) - falling back to ", D("max_more_tries"))
         opts.max_more_tries = D("max_more_tries")
     else
         opts.max_more_tries = mmt
@@ -320,7 +320,7 @@ function _G.register_route(name, opts_factory)
         opts.adaptive_cc = nil                                       -- 显式关 = 走硬熔断(与"未开"同路径)
     end
     opts.adaptive_cc_min           = opts.adaptive_cc_min           -- 可选下限;不配 = 按 min_frac 从静态 max 派生
-    opts.adaptive_cc_min_frac      = opts.adaptive_cc_min_frac      or D("adaptive_cc_min_frac")  -- min 缺省 = 静态max×frac(≥1)
+    opts.adaptive_cc_min_frac      = opts.adaptive_cc_min_frac      or D("adaptive_cc_min_frac")  -- unset min = static max x frac (at least 1)
     -- Optional starting point inside [min, max]: a fresh/expired cc starts here, and the slack
     -- (low-traffic) shrink stops here instead of at min. Overload shrink can still go down to min.
     -- Neither set → init = min (previous behaviour). No global default on purpose.
@@ -334,8 +334,8 @@ function _G.register_route(name, opts_factory)
     -- is a boolean (it used to stay nil = on) and a string "False" means off rather than truthy-on.
     util.bool_opt(opts, "adaptive_cc_use_ttft", D("adaptive_cc_use_ttft"), name)
     opts.adaptive_cc_interval      = opts.adaptive_cc_interval      or opts.tps_window  -- AIMD 步长,默认=tps_window
-    opts.adaptive_cc_dec           = opts.adaptive_cc_dec           or D("adaptive_cc_dec")  -- EWMA<阈值 → ×dec(减)
-    opts.adaptive_cc_inc           = opts.adaptive_cc_inc           or D("adaptive_cc_inc")  -- EWMA>=阈值 → ×inc(增)
+    opts.adaptive_cc_dec           = opts.adaptive_cc_dec           or D("adaptive_cc_dec")  -- EWMA below threshold -> x dec (shrink)
+    opts.adaptive_cc_inc           = opts.adaptive_cc_inc           or D("adaptive_cc_inc")  -- EWMA at or above threshold -> x inc (grow)
     -- TTL of the adaptive_cc value: with no EWMA signal for this long it expires and the pool falls back to init (= min unless configured).
     -- 全局默认 _G.ADAPTIVE_CC_TTL(300s/5min):短暂信号缺口内保持,持续无信号才复位到 min。
     opts.adaptive_cc_ttl           = opts.adaptive_cc_ttl           or D("adaptive_cc_ttl")
@@ -356,14 +356,14 @@ function _G.register_route(name, opts_factory)
             if type(opts.adaptive_cc_min_frac) ~= "number"
                or opts.adaptive_cc_min_frac <= 0 or opts.adaptive_cc_min_frac > 1 then
                 ngx.log(ngx.ERR, "[", name, "] adaptive_cc_min_frac=", tostring(opts.adaptive_cc_min_frac),
-                        " 非法(需 0<frac≤1)— 回落全局默认 ", tostring(D("adaptive_cc_min_frac")))
+                        " is invalid (need 0 < frac <= 1) - falling back to the global default ", tostring(D("adaptive_cc_min_frac")))
                 opts.adaptive_cc_min_frac = D("adaptive_cc_min_frac")
             end
             -- pressure_frac 必须 0<frac≤1(0/负 → 门永真 → 静默退回无脑涨 no-op);非法回落全局默认
             if type(opts.adaptive_cc_pressure_frac) ~= "number"
                or opts.adaptive_cc_pressure_frac <= 0 or opts.adaptive_cc_pressure_frac > 1 then
                 ngx.log(ngx.ERR, "[", name, "] adaptive_cc_pressure_frac=", tostring(opts.adaptive_cc_pressure_frac),
-                        " 非法(需 0<frac≤1)— 回落全局默认 ", tostring(D("adaptive_cc_pressure_frac")))
+                        " is invalid (need 0 < frac <= 1) - falling back to the global default ", tostring(D("adaptive_cc_pressure_frac")))
                 opts.adaptive_cc_pressure_frac = D("adaptive_cc_pressure_frac")
             end
             -- slack_frac 必须 0<frac<pressure_frac(留 [slack,pressure) 保持带防抖;≥pressure 会涨缩打架抖动)
@@ -378,7 +378,7 @@ function _G.register_route(name, opts_factory)
             -- adaptive_cc_abs 必须是 ≥0 数字(负/非数 → 绝对头寸逻辑乱);非法回落全局默认
             if type(opts.adaptive_cc_abs) ~= "number" or opts.adaptive_cc_abs < 0 then
                 ngx.log(ngx.ERR, "[", name, "] adaptive_cc_abs=", tostring(opts.adaptive_cc_abs),
-                        " 非法(需 ≥0 数字)— 回落全局默认 ", tostring(D("adaptive_cc_abs")))
+                        " is invalid (need a number >= 0) - falling back to the global default ", tostring(D("adaptive_cc_abs")))
                 opts.adaptive_cc_abs = D("adaptive_cc_abs")
             end
             if opts.adaptive_cc_min ~= nil then
