@@ -67,7 +67,7 @@ M.DIRECTIVES = {
   { key = "max_more_tries", label = "Retry budget", group = "Capacity & failover", kind = "number",
     detail = "Upper bound on balancer retries for one request. A positive integer; anything else falls back to the default. autoconfig sets 3 on routes with a backend Service tier unless the route sets it." },
   { key = "cross_tier_fallback", label = "Cross-tier fallback", group = "Capacity & failover", kind = "boolean",
-    detail = "On, a 5xx or connection failure in the top tier falls straight through to one representative of each lower tier instead of waiting for the health timer to ban the peer. autoconfig turns it on for routes with a backend Service tier unless the route sets it. Accepts true/false (also yes/no, on/off, 1/0); anything else is logged and means off." },
+    detail = "On (the default), a 5xx or connection failure in the top tier falls straight through to one representative of each lower tier instead of waiting for the health timer to ban the peer. Off keeps a failed request inside its tier until the peer is banned. Accepts true/false (also yes/no, on/off, 1/0); anything else is logged and the default stands." },
 
   { hidden = true, key = "health_check_interval", label = "Probe interval", group = "Health checks", kind = "number",
     detail = "Seconds between active probes of each peer." },

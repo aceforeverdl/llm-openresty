@@ -67,7 +67,7 @@ M.DEFAULTS = {
     default_max                = global("MAX_CONCURRENCY_PER_PEER"),
     rt_limit_factor            = global("RT_LIMIT_FACTOR"),
     max_more_tries             = 2,
-    cross_tier_fallback        = false,
+    cross_tier_fallback        = true,
     -- health checks / routing
     health_check_interval      = 10,
     health_ban_ttl             = 300,
@@ -225,10 +225,11 @@ function _G.register_route(name, opts_factory)
     opts.health_ban_ttl            = opts.health_ban_ttl            or D("health_ban_ttl")
     opts.health_probe_path         = opts.health_probe_path         or D("health_probe_path")  -- path the health probe GETs; per route, for backends whose probe endpoint differs
     opts.cluster_avg_interval      = opts.cluster_avg_interval      or D("cluster_avg_interval")
-    -- ── 跨层单请求 fallback(默认关)──
-    -- cross_tier_fallback:开时高优层 5xx/连接失败即刻兜到低优层代表(不等 health-timer ban)。
-    --   Parsed with util.bool_opt: a plain truthiness test turned "False" / "0" into "on" (any string
-    --   is truthy in Lua). Unset -> false; unrecognised -> false with an ERR.
+    -- ── Cross-tier single-request fallback (default on) ──
+    -- cross_tier_fallback: a 5xx / connection failure in the top tier falls straight through to one
+    --   representative of each lower tier, without waiting for the health timer to ban the peer.
+    --   A route sets false to keep a failed request inside its tier. Parsed with util.bool_opt:
+    --   unset -> the default (true); unrecognised -> the default with an ERR.
     util.bool_opt(opts, "cross_tier_fallback", D("cross_tier_fallback"), name)
     -- max_more_tries:balancer.set_more_tries 的重试预算上限(需正整数;非法回退 2)。
     local mmt = tonumber(opts.max_more_tries)
