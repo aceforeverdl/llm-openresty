@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 验证请求体上限落在预期的层:dispatch(:8080) 是天花板(100m),业务上限在 per-model。
+# Checks that body limits sit where expected: dispatch (:8080) is the ceiling (its value is read from
+# session_base.conf), the business limits are per route.
 #
 # 背景:dispatch 在 per-model【之前】处理请求,一条路径上取最严的那层。原来 dispatch 压 10m,
 # 于是任何 per-model 想放宽(视频生成要 64MB 的 base64 图)都够不着。改成 dispatch 100m +
@@ -65,6 +66,12 @@ http {
         client_max_body_size 64m;
         location / { proxy_pass http://127.0.0.1:$MOCK_PORT; }
     }
+    # A route whose own limit is far above the dispatch ceiling: what it accepts is decided by dispatch.
+    server {
+        listen unix:$PREFIX/sock/huge.sock;
+        client_max_body_size 1g;
+        location / { proxy_pass http://127.0.0.1:$MOCK_PORT; }
+    }
     # 直连大额度 per-model(绕过 dispatch),用来确认"业务层自己说了算"
     server {
         listen $BIG_PORT;
@@ -107,7 +114,12 @@ echo "== 经 dispatch 打大额度路由(业务上限 64m):dispatch 不再是瓶
 check "20MB 应放行"     200 "$(probe "http://127.0.0.1:$DISPATCH_PORT/video/v2/video_generation" $((20*1024*1024)))"
 check "60MB 应放行"     200 "$(probe "http://127.0.0.1:$DISPATCH_PORT/video/v2/video_generation" $((60*1024*1024)))"
 
-echo "== 超过 dispatch 天花板(100m)时,连大额度路由也进不来"
+# The ceiling itself, on a route that allows 1g: just under it passes, just over it is refused by dispatch.
+CEIL_MB=$(echo "$DISPATCH_LIMIT" | python3 -c 'import sys;s=sys.stdin.read().strip().lower();n=int(s[:-1]);print({"k":n//1024,"m":n,"g":n*1024}[s[-1]])')
+echo "== dispatch ceiling ($DISPATCH_LIMIT) on a route that allows 1g"
+check "$((CEIL_MB-10))MB under the ceiling passes"  200 "$(probe "http://127.0.0.1:$DISPATCH_PORT/huge/v1/chat/completions" $(((CEIL_MB-10)*1024*1024)))"
+check "$((CEIL_MB+10))MB over the ceiling is refused"  413 "$(probe "http://127.0.0.1:$DISPATCH_PORT/huge/v1/chat/completions" $(((CEIL_MB+10)*1024*1024)))"
+echo "== a route with a lower limit refuses first (video 64m)"
 check "110MB 应被 413"  413 "$(probe "http://127.0.0.1:$DISPATCH_PORT/video/v2/video_generation" $((110*1024*1024)))"
 
 echo "== 直连 per-model(绕过 dispatch):业务层自己说了算"
