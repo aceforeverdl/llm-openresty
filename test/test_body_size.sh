@@ -5,7 +5,8 @@
 #   big  -- sets `client_max_body_size 50m;` in its own server block, as autoconfig renders it
 # Checks: nginx -t accepts the override (the shared include no longer sets the directive, so it is not a
 # duplicate); 5MB to dflt = 200; 12MB to dflt = 413; 12MB to big = 200 (override above the default works);
-# 120MB to big = 413 at dispatch (100m is the ceiling). Runs where openresty is installed (the test box).
+# 120MB to big = 413 (its own 50m); on a route allowing 1g, 150MB passes and 210MB is refused at dispatch
+# (200m is the ceiling). Runs where openresty is installed (the test box).
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; BASE="$HERE/.."
 OPENRESTY="${OPENRESTY:-/usr/local/openresty/bin/openresty}"; PY="${PY:-python3}"
@@ -44,6 +45,7 @@ EOF
 }
 mkroute dflt 28955 ""
 mkroute big  28956 "client_max_body_size 50m;"
+mkroute huge 28956 "client_max_body_size 1g;"
 
 cat > "$PREFIX/nginx.conf" <<EOF
 worker_processes 1; error_log logs/error.log warn; pid logs/nginx.pid;
@@ -67,12 +69,14 @@ P=0; F=0; ok(){ echo "  PASS: $1"; P=$((P+1)); }; no(){ echo "  FAIL: $1"; F=$((
 mkbody(){ "$PY" -c "import json,sys;print(json.dumps({'model':'x','stream':False,'max_tokens':4,'messages':[{'role':'user','content':'a'*int(sys.argv[1])}]}))" "$1" > "$PREFIX/body_$1"; }
 code(){ curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
           --data-binary @"$PREFIX/body_$2" "http://127.0.0.1:19780/$1/v1/chat/completions"; }
-for n in 5000000 12000000 120000000; do mkbody $n; done
+for n in 5000000 12000000 120000000 150000000 210000000; do mkbody $n; done
 echo "=== per-route body limit ==="
 c=$(code dflt 5000000);   [ "$c" = 200 ] && ok "5MB to the default route -> 200" || no "5MB dflt -> $c"
 c=$(code dflt 12000000);  [ "$c" = 413 ] && ok "12MB to the default route -> 413 (10m default)" || no "12MB dflt -> $c"
 c=$(code big 12000000);   [ "$c" = 200 ] && ok "12MB to the 50m route -> 200 (override above the default)" || no "12MB big -> $c"
-c=$(code big 120000000);  [ "$c" = 413 ] && ok "120MB to the 50m route -> 413 (dispatch 100m ceiling)" || no "120MB big -> $c"
+c=$(code big 120000000);  [ "$c" = 413 ] && ok "120MB to the 50m route -> 413 (its own limit)" || no "120MB big -> $c"
+c=$(code huge 150000000); [ "$c" = 200 ] && ok "150MB to the 1g route -> 200 (above the old 100m ceiling)" || no "150MB huge -> $c"
+c=$(code huge 210000000); [ "$c" = 413 ] && ok "210MB to the 1g route -> 413 (dispatch 200m ceiling)" || no "210MB huge -> $c"
 grep -q 'client intended to send too large body: 12000' "$PREFIX/logs/error.log" && ok "the 12MB refusal is logged" || no "no too-large log line for 12MB"
 echo "==== result: PASS=$P FAIL=$F ===="
 [ "$F" -eq 0 ] && echo "ALL GOOD" || { echo "HAS FAILURES"; exit 1; }
