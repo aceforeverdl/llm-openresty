@@ -18,6 +18,38 @@
 `COPY ... TO ... (FORMAT parquet, COMPRESSION zstd)` 转 parquet,成功后删 jsonl。parquet 保留
 `BODYLOG_DETAILS_KEEP_DAYS` 天(默认 365)。
 
+## Retention
+
+All deletion of finished data happens in one place, `prune` (`retention.go`), run by a single
+goroutine every `BODYLOG_PRUNE_INTERVAL_SECONDS` and once at startup. `housekeep` only archives
+(tar a day dir, convert details to parquet, clear crashed temps) and deletes nothing by policy,
+so two deleters can never race over the same files (the shape of the 2026-09-15 data loss).
+
+Each pass deletes data when **either** condition is met:
+
+| Condition | Config | Default | What is deleted |
+|---|---|---|---|
+| Age | `BODYLOG_KEEP_DAYS` / `BODYLOG_DETAILS_KEEP_DAYS` | 90 / 365 days | archives / details older than N days |
+| Disk usage | `BODYLOG_DISK_USAGE_PCT` (`0` = off) | 90 | oldest data first, until the filesystem holding `BODYLOG_DIR` is below N% used (same formula as `df`) |
+| | `BODYLOG_PRUNE_INTERVAL_SECONDS` | 3600 | how often a pass runs (the 10 minute disk cooldown only matters if this is set lower) |
+
+Disk-usage step: if usage is at or above the threshold, it deletes the oldest data, **just enough
+bytes by file size** to get below it: history archives (`<date>.tar.gz`, legacy `<date>.jsonl.gz`)
+first, details (`metrics/details/`, ~1000x smaller) only once no archive is left. It does not
+re-measure after each delete (space held by an open file or freed asynchronously would make it
+delete everything), and after a batch it waits 10 minutes before deleting for disk pressure again.
+Bytes deleted by the age step in the same pass are counted as already freed (on XFS a large
+unlinked file is released in the background, so statfs right after can still show it).
+If even deleting every candidate could not get below the threshold, it deletes **nothing** and
+logs `prune: disk N% used ... deleting nothing` (at most once an hour): the disk is full of
+something else, and wiping bodylog history would not fix it.
+
+Never deleted: day directories (today's, and yesterday's while it waits to be archived),
+archives in progress (`*.tar.gz.tmp-*`), a legacy `<date>.jsonl.gz` while its `<date>.jsonl` still
+exists, details that `rotateDetails` may still convert (a jsonl inside the retention window
+while DuckDB is available, a parquet whose jsonl still exists), today's details, and the
+per-minute aggregates in `metrics/`. Retention and archiving therefore never touch the same file.
+
 ## HTTP 接口(端口 9998)
 
 **鉴权**:`BODYLOG_HTTP_TOKEN` 设置后,`/summary` 与 `/metrics` 需带 `Authorization: Bearer <token>`(或 `?token=<token>`),否则 401;`/healthz` 始终开放。**不设则不鉴权**(opt-in,向后兼容)。⚠️ 启用后调用方必须带 token —— 尤其 **monitor 拉 `/summary`** 要同步配上同一个 token(见 `monitor` 的 `BODYLOG_SUMMARY_URL`),否则 TPM/TTFT 断采。
