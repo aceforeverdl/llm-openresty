@@ -1,0 +1,39 @@
+# Unit tests for the Go components.
+#
+# Separate from release.yml so a pull request is tested without going anywhere
+# near the publish path. release.yml runs the same tests as a gate before it
+# pushes an image, so a tag cannot produce an image whose tests fail.
+name: test
+
+on:
+  pull_request:
+    paths: &go_paths
+      - 'bodylog-listener-go/**'
+      - 'Dockerfile.bodylog'
+      - '.github/workflows/test.yml'
+  push:
+    branches: [main]
+    paths: *go_paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bodylog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: bodylog-listener-go/go.sum
+
+      # CGO is required -- go-duckdb embeds libduckdb.a (cxx11 ABI). The runner
+      # image already carries a new enough gcc, so nothing needs installing.
+      - name: go test
+        working-directory: bodylog-listener-go
+        env:
+          CGO_ENABLED: 1
+        run: go test ./...

@@ -104,8 +104,40 @@ jobs:
 
           echo "ref=$REF -> version=$VERSION latest=$LATEST (openresty=$O bodylog=$B exporter=$E)"
 
-  image:
+  # Tests gate the push: nothing is published unless they pass.
+  #
+  # The job always runs rather than carrying an `if:`. A job whose `needs` was
+  # skipped is itself skipped, so gating this one on "is bodylog in this tag"
+  # would stop an openresty/ or exporter/ tag from building anything at all.
+  # Instead it runs, checks what the tag selected, and does nothing when bodylog
+  # is not part of it -- the same shape the image job uses below.
+  test:
     needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Does this ref build bodylog?
+        id: gate
+        run: echo "run=${{ needs.setup.outputs.bodylog }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - uses: actions/setup-go@v5
+        if: steps.gate.outputs.run == 'true'
+        with:
+          go-version: '1.24'
+          cache-dependency-path: bodylog-listener-go/go.sum
+
+      # CGO is required -- go-duckdb embeds libduckdb.a (cxx11 ABI).
+      - name: go test
+        if: steps.gate.outputs.run == 'true'
+        working-directory: bodylog-listener-go
+        env:
+          CGO_ENABLED: 1
+        run: go test ./...
+
+  image:
+    needs: [setup, test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
