@@ -181,14 +181,19 @@ function M.do_adaptive_cc_loop(opts)
         -- 自然老化到 min)。TTFT 收缩只在**有 TPS 活性**时叠加,不能靠 TTFT 单独驱动 —— 否则 TTFT 尖峰后
         -- 流量归零、TPS EWMA 已过期而 TTFT EWMA 仍 stale-high(可存活 ttft_ttl),会每 tick 把空闲池的 cc 拽到 min。
         if not ewma then
-            -- No signal, so nothing below runs and nothing is written this tick. That also means a
-            -- value written while hold_when_idle was on (TTL 0, never expires) would outlive the
-            -- switch being turned off for as long as the pool stays idle: the "next write" that
-            -- re-applies the TTL never comes. Give such a value the normal TTL once. Only TTL 0 is
-            -- touched -- refreshing a value that already has a TTL would keep it from ever expiring.
-            if not opts.adaptive_cc_hold_when_idle then
-                local key = pre .. "adaptive_cc"
-                if td:ttl(key) == 0 then td:expire(key, CC_TTL) end
+            -- No signal, so nothing below runs and nothing is written this tick. A switch of
+            -- hold_when_idle made while the pool sits idle would then never reach the stored value,
+            -- because the write that applies it never comes. Apply it here, to the TTL only:
+            --   hold on,  value has a TTL -> never expire, so the idle pool keeps its last value;
+            --   hold off, value has TTL 0 -> the normal TTL, so it ages out to init as usual.
+            -- Each case changes the TTL once and then no longer matches. A value that already has
+            -- the right kind of TTL is left alone: refreshing a TTL every tick would keep it alive.
+            local key = pre .. "adaptive_cc"
+            local ttl = td:ttl(key)   -- nil when absent or expired
+            if opts.adaptive_cc_hold_when_idle then
+                if ttl and ttl > 0 then td:expire(key, 0) end
+            elseif ttl == 0 then
+                td:expire(key, CC_TTL)
             end
             return
         end
@@ -251,8 +256,8 @@ function M.do_adaptive_cc_loop(opts)
         -- 带 TTL 写入:有 EWMA 信号就刷新(值持续有效);无信号则不写 → CC_TTL 后老化消失 →
         -- assess_pool reads nil -> do_route falls back to init (= min unless configured). CC_TTL is much longer than the interval, so short gaps keep the current value.
         -- hold_when_idle: no TTL (0 = never expires), so a long idle keeps the last value instead of
-        -- falling back to init. Turning the switch off later re-applies the TTL on the next write,
-        -- or, on an idle pool with no next write, in the no-signal branch above.
+        -- falling back to init. Flipping the switch takes effect on the next write, or, on an idle
+        -- pool with no next write, in the no-signal branch above.
         td:set(pre .. "adaptive_cc", cur, opts.adaptive_cc_hold_when_idle and 0 or CC_TTL)
     end
 
