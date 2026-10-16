@@ -188,12 +188,20 @@ function M.do_adaptive_cc_loop(opts)
             --   hold off, value has TTL 0 -> the normal TTL, so it ages out to init as usual.
             -- Each case changes the TTL once and then no longer matches. A value that already has
             -- the right kind of TTL is left alone: refreshing a TTL every tick would keep it alive.
+            -- get() first: ttl() alone cannot tell "never expires" from "expires right now". At the
+            -- millisecond an entry expires ttl() returns 0 (negative after, until eviction) while get()
+            -- already returns nil, and expire() on it brings the value back. The TTL is usually a
+            -- multiple of the interval, so expiry often lands on a tick and the value would be
+            -- revived every TTL. get() and ttl() read the same cached time within this callback, so a
+            -- value get() still returns has ttl() > 0, or exactly 0 only when it truly never expires.
             local key = pre .. "adaptive_cc"
-            local ttl = td:ttl(key)   -- nil when absent or expired
-            if opts.adaptive_cc_hold_when_idle then
-                if ttl and ttl > 0 then td:expire(key, 0) end
-            elseif ttl == 0 then
-                td:expire(key, CC_TTL)
+            if td:get(key) ~= nil then
+                local ttl = td:ttl(key)
+                if opts.adaptive_cc_hold_when_idle then
+                    if ttl and ttl > 0 then td:expire(key, 0) end
+                elseif ttl == 0 then
+                    td:expire(key, CC_TTL)
+                end
             end
             return
         end
