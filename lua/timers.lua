@@ -180,7 +180,31 @@ function M.do_adaptive_cc_loop(opts)
         -- TPS EWMA 是**活性信号**:nil = 无近期解码样本(lull / 无流量)→ 保持当前值不动(不写 → cc 按 CC_TTL
         -- 自然老化到 min)。TTFT 收缩只在**有 TPS 活性**时叠加,不能靠 TTFT 单独驱动 —— 否则 TTFT 尖峰后
         -- 流量归零、TPS EWMA 已过期而 TTFT EWMA 仍 stale-high(可存活 ttft_ttl),会每 tick 把空闲池的 cc 拽到 min。
-        if not ewma then return end
+        if not ewma then
+            -- No signal, so nothing below runs and nothing is written this tick. A switch of
+            -- hold_when_idle made while the pool sits idle would then never reach the stored value,
+            -- because the write that applies it never comes. Apply it here, to the TTL only:
+            --   hold on,  value has a TTL -> never expire, so the idle pool keeps its last value;
+            --   hold off, value has TTL 0 -> the normal TTL, so it ages out to init as usual.
+            -- Each case changes the TTL once and then no longer matches. A value that already has
+            -- the right kind of TTL is left alone: refreshing a TTL every tick would keep it alive.
+            -- get() first: ttl() alone cannot tell "never expires" from "expires right now". At the
+            -- millisecond an entry expires ttl() returns 0 (negative after, until eviction) while get()
+            -- already returns nil, and expire() on it brings the value back. The TTL is usually a
+            -- multiple of the interval, so expiry often lands on a tick and the value would be
+            -- revived every TTL. get() and ttl() read the same cached time within this callback, so a
+            -- value get() still returns has ttl() > 0, or exactly 0 only when it truly never expires.
+            local key = pre .. "adaptive_cc"
+            if td:get(key) ~= nil then
+                local ttl = td:ttl(key)
+                if opts.adaptive_cc_hold_when_idle then
+                    if ttl and ttl > 0 then td:expire(key, 0) end
+                elseif ttl == 0 then
+                    td:expire(key, CC_TTL)
+                end
+            end
+            return
+        end
         local ttft_over = ttft_overloaded(model)   -- 首token慢也当过载信号(方案②),与 ewma<thr 同级叠加(仅有 TPS 活性时)
         local maxcc = route.compute_static_max_cc(opts, model)
         if maxcc <= 0 then return end
@@ -240,7 +264,8 @@ function M.do_adaptive_cc_loop(opts)
         -- 带 TTL 写入:有 EWMA 信号就刷新(值持续有效);无信号则不写 → CC_TTL 后老化消失 →
         -- assess_pool reads nil -> do_route falls back to init (= min unless configured). CC_TTL is much longer than the interval, so short gaps keep the current value.
         -- hold_when_idle: no TTL (0 = never expires), so a long idle keeps the last value instead of
-        -- falling back to init. Turning the switch off later re-applies the TTL on the next write.
+        -- falling back to init. Flipping the switch takes effect on the next write, or, on an idle
+        -- pool with no next write, in the no-signal branch above.
         td:set(pre .. "adaptive_cc", cur, opts.adaptive_cc_hold_when_idle and 0 or CC_TTL)
     end
 

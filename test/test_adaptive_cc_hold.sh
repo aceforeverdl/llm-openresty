@@ -9,6 +9,11 @@
 #   ④ light load: hold keeps its peak, ctl shrinks
 #   ⑤ full idle past both TTLs: hold keeps its value, ctl expires
 #   ⑥ overload still shrinks the held route
+#   ⑦ switching hold off on an idle pool lets the held value expire (it used to stay forever:
+#      no traffic means no write, so the never-expiring value was never given a TTL)
+#   ⑧ switching hold on on an idle pool keeps the value (it used to expire on its old TTL). Needs a
+#      route whose cc TTL outlives the TPS signal, as in production (cc 300s vs a shorter tps_ttl);
+#      "late" has cc ttl 20s against tps_ttl 8s so the idle-but-still-set window exists.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ENGINE="${ENGINE:-$HERE/../session_base.conf}"; MOCK="${MOCK:-$HERE/mock_vllm_sse.py}"
@@ -26,7 +31,7 @@ srv=$(grep -n "^server {" "$ENGINE"|head -1|cut -d: -f1); end=$(awk -v s="$srv" 
 sed -n "${start},${end}p" "$ENGINE" > "$PREFIX/initblock.conf"
 source "$HERE/lib_initblock.sh"; prepend_lua_path "$PREFIX/initblock.conf" "$HERE/../lua"
 
-ROUTES="hold ctl hbad"
+ROUTES="hold ctl hbad late"
 {
 cat <<'EOF'
 worker_processes 1; error_log logs/error.log warn; pid logs/nginx.pid;
@@ -57,13 +62,17 @@ cat <<'EOF'
     _G.register_route("hold", function() return R({adaptive_cc_hold_when_idle=true}) end)
     _G.register_route("ctl",  function() return R({}) end)                                -- control: switch off
     _G.register_route("hbad", function() return R({adaptive_cc_hold_when_idle="maybe"}) end)  -- unrecognised → global default (pinned false above)
+    _G.register_route("late", function() return R({adaptive_cc_ttl=20}) end)              -- off, cc TTL > tps_ttl (for ⑧)
   }
 EOF
 port=19750
 for r in $ROUTES; do
   echo "  server { listen $port; server_name _; set \$routed_session_id \"-\"; set \$routed_source \"-\"; set \$routed_mode \"-\"; set \$routed_peer \"-\"; set \$routed_dict \"\";"
   echo "    location /v1/ { access_by_lua_block { _G.do_route(_G.__route_opts.$r) } body_filter_by_lua_block { _G.bodylog_filter_chunk() } proxy_pass http://vllm_backends; proxy_http_version 1.1; proxy_buffering off; proxy_read_timeout 3600s; log_by_lua_block { _G.do_log_release(_G.__route_opts.$r) } }"
-  echo "    location = /_tps_status { content_by_lua_block { _G.dbg_tps_status(_G.__route_opts.$r) } } }"
+  echo "    location = /_tps_status { content_by_lua_block { _G.dbg_tps_status(_G.__route_opts.$r) } }"
+  # Test-only: flip the route's hold switch in place, as a config change would (one worker).
+  echo "    location = /_hold_off { content_by_lua_block { _G.__route_opts.$r.adaptive_cc_hold_when_idle = false; ngx.say(\"ok\") } }"
+  echo "    location = /_hold_on { content_by_lua_block { _G.__route_opts.$r.adaptive_cc_hold_when_idle = true; ngx.say(\"ok\") } } }"
   port=$((port+1))
 done
 echo "}"
@@ -75,7 +84,7 @@ sleep 3; "$OPENRESTY" -p "$PREFIX" -c "$PREFIX/nginx.conf"; sleep 2
 
 P=0; F=0; ok(){ echo "  ✓ $1"; P=$((P+1)); }; no(){ echo "  ✗ FAIL: $1"; F=$((F+1)); }
 H="Content-Type: application/json"; A="Authorization: Bearer $KEY"
-HOLD=http://127.0.0.1:19750; CTL=http://127.0.0.1:19751; HBAD=http://127.0.0.1:19752
+HOLD=http://127.0.0.1:19750; CTL=http://127.0.0.1:19751; HBAD=http://127.0.0.1:19752; LATE=http://127.0.0.1:19753
 body(){ echo "{\"stream_options\":{\"include_usage\":true},\"model\":\"x\",\"stream\":true,\"chunk_delay_ms\":$1,\"max_tokens\":$2,\"prefill_delay_ms\":15,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"; }
 fire(){ curl -s -o /dev/null -N -H "$A" -H "$H" -d "$(body $2 $3)" "$1/v1/chat/completions"; }
 # keep ~n overlapping requests for dur seconds (chunk ms x tokens per request)
@@ -133,6 +142,40 @@ load_n $HOLD 2 12 60 40
 ho=$(fv $HOLD adaptive_cc)
 echo "  overload: hold cc=$ho (was $hi)"
 awk "BEGIN{exit !($(num $ho)>=2 && $(num $ho)<$(num $hi))}" && ok "⑥ overload still shrinks the held cc ($hi → $ho)" || no "⑥ hold cc=$ho after overload, want < $hi"
+
+# ⑦ hold switched off while idle: the value hold wrote (no TTL) must expire within interval + cc ttl.
+#   Let ⑥'s traffic age out first (tps_ttl 8s) so the pool is idle with a held, never-expiring value.
+sleep 12
+hb=$(fv $HOLD adaptive_cc)
+# Precondition, checked rather than assumed: the TPS signal must be gone. With a signal still
+# present the next tick takes the normal write path, which applies the new switch on its own, so
+# this step would pass on the unfixed code and prove nothing.
+[ "$(fv $HOLD ewma_tps)" = "None" ] && ok "⑦ precondition: no TPS signal at the switch" \
+                                   || no "⑦ precondition: TPS signal still present ($(fv $HOLD ewma_tps)); the step below would not test the idle path"
+echo "  idle again, held cc=$hb; switching hold off"
+curl -s "$HOLD/_hold_off" >/dev/null
+sleep 12   # > interval (2s) + cc ttl (6s)
+ha=$(fv $HOLD adaptive_cc)
+[ "$(fv $HOLD adaptive_cc_hold_when_idle)" = "False" ] && ok "⑦ switch now reports off" || no "⑦ switch still on"
+[ "$ha" = "None" ] && ok "⑦ held value expired after hold was switched off on an idle pool ($hb → expired)" \
+                   || no "⑦ held value still $ha after hold was switched off and the pool sat idle past the TTL"
+
+# ⑧ hold switched on while idle: a value with a TTL must stop expiring.
+#   Light load writes cc on "late" (hold off, cc ttl 20s). After the TPS signal is gone (tps_ttl 8s)
+#   the pool is idle but cc is still set; switch hold on and wait past the old 20s TTL.
+load_n $LATE 1 6
+lb=$(fv $LATE adaptive_cc)
+sleep 10   # > tps_ttl (8s): no signal any more, cc still has ~10s of its 20s TTL
+lm=$(fv $LATE adaptive_cc)
+echo "  late route: cc=$lb after load, $lm once idle; switching hold on"
+[ "$lm" != "None" ] && ok "⑧ precondition: idle pool still holds a cc ($lm)" || no "⑧ precondition: cc already gone before the switch ($lm)"
+[ "$(fv $LATE ewma_tps)" = "None" ] && ok "⑧ precondition: no TPS signal at the switch" \
+                                   || no "⑧ precondition: TPS signal still present ($(fv $LATE ewma_tps)); the step below would not test the idle path"
+curl -s "$LATE/_hold_on" >/dev/null
+sleep 22   # past the old 20s TTL
+la=$(fv $LATE adaptive_cc)
+[ "$la" = "$lm" ] && ok "⑧ value kept after hold was switched on on an idle pool ($la)" \
+                  || no "⑧ value $lm became $la after hold was switched on and the old TTL passed"
 
 echo "==== result: PASS=$P FAIL=$F ===="
 [ "$F" -eq 0 ] && echo "ALL GOOD" || echo "HAS FAILURES"
