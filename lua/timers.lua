@@ -180,7 +180,18 @@ function M.do_adaptive_cc_loop(opts)
         -- TPS EWMA 是**活性信号**:nil = 无近期解码样本(lull / 无流量)→ 保持当前值不动(不写 → cc 按 CC_TTL
         -- 自然老化到 min)。TTFT 收缩只在**有 TPS 活性**时叠加,不能靠 TTFT 单独驱动 —— 否则 TTFT 尖峰后
         -- 流量归零、TPS EWMA 已过期而 TTFT EWMA 仍 stale-high(可存活 ttft_ttl),会每 tick 把空闲池的 cc 拽到 min。
-        if not ewma then return end
+        if not ewma then
+            -- No signal, so nothing below runs and nothing is written this tick. That also means a
+            -- value written while hold_when_idle was on (TTL 0, never expires) would outlive the
+            -- switch being turned off for as long as the pool stays idle: the "next write" that
+            -- re-applies the TTL never comes. Give such a value the normal TTL once. Only TTL 0 is
+            -- touched -- refreshing a value that already has a TTL would keep it from ever expiring.
+            if not opts.adaptive_cc_hold_when_idle then
+                local key = pre .. "adaptive_cc"
+                if td:ttl(key) == 0 then td:expire(key, CC_TTL) end
+            end
+            return
+        end
         local ttft_over = ttft_overloaded(model)   -- 首token慢也当过载信号(方案②),与 ewma<thr 同级叠加(仅有 TPS 活性时)
         local maxcc = route.compute_static_max_cc(opts, model)
         if maxcc <= 0 then return end
@@ -240,7 +251,8 @@ function M.do_adaptive_cc_loop(opts)
         -- 带 TTL 写入:有 EWMA 信号就刷新(值持续有效);无信号则不写 → CC_TTL 后老化消失 →
         -- assess_pool reads nil -> do_route falls back to init (= min unless configured). CC_TTL is much longer than the interval, so short gaps keep the current value.
         -- hold_when_idle: no TTL (0 = never expires), so a long idle keeps the last value instead of
-        -- falling back to init. Turning the switch off later re-applies the TTL on the next write.
+        -- falling back to init. Turning the switch off later re-applies the TTL on the next write,
+        -- or, on an idle pool with no next write, in the no-signal branch above.
         td:set(pre .. "adaptive_cc", cur, opts.adaptive_cc_hold_when_idle and 0 or CC_TTL)
     end
 

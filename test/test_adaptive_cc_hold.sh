@@ -9,6 +9,8 @@
 #   ④ light load: hold keeps its peak, ctl shrinks
 #   ⑤ full idle past both TTLs: hold keeps its value, ctl expires
 #   ⑥ overload still shrinks the held route
+#   ⑦ switching hold off on an idle pool lets the held value expire (it used to stay forever:
+#      no traffic means no write, so the never-expiring value was never given a TTL)
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ENGINE="${ENGINE:-$HERE/../session_base.conf}"; MOCK="${MOCK:-$HERE/mock_vllm_sse.py}"
@@ -63,7 +65,9 @@ port=19750
 for r in $ROUTES; do
   echo "  server { listen $port; server_name _; set \$routed_session_id \"-\"; set \$routed_source \"-\"; set \$routed_mode \"-\"; set \$routed_peer \"-\"; set \$routed_dict \"\";"
   echo "    location /v1/ { access_by_lua_block { _G.do_route(_G.__route_opts.$r) } body_filter_by_lua_block { _G.bodylog_filter_chunk() } proxy_pass http://vllm_backends; proxy_http_version 1.1; proxy_buffering off; proxy_read_timeout 3600s; log_by_lua_block { _G.do_log_release(_G.__route_opts.$r) } }"
-  echo "    location = /_tps_status { content_by_lua_block { _G.dbg_tps_status(_G.__route_opts.$r) } } }"
+  echo "    location = /_tps_status { content_by_lua_block { _G.dbg_tps_status(_G.__route_opts.$r) } }"
+  # Test-only: flip the route's hold switch in place, as a config change would (one worker).
+  echo "    location = /_hold_off { content_by_lua_block { _G.__route_opts.$r.adaptive_cc_hold_when_idle = false; ngx.say(\"ok\") } } }"
   port=$((port+1))
 done
 echo "}"
@@ -133,6 +137,18 @@ load_n $HOLD 2 12 60 40
 ho=$(fv $HOLD adaptive_cc)
 echo "  overload: hold cc=$ho (was $hi)"
 awk "BEGIN{exit !($(num $ho)>=2 && $(num $ho)<$(num $hi))}" && ok "⑥ overload still shrinks the held cc ($hi → $ho)" || no "⑥ hold cc=$ho after overload, want < $hi"
+
+# ⑦ hold switched off while idle: the value hold wrote (no TTL) must expire within interval + cc ttl.
+#   Let ⑥'s traffic age out first (tps_ttl 8s) so the pool is idle with a held, never-expiring value.
+sleep 12
+hb=$(fv $HOLD adaptive_cc)
+echo "  idle again, held cc=$hb; switching hold off"
+curl -s "$HOLD/_hold_off" >/dev/null
+sleep 12   # > interval (2s) + cc ttl (6s)
+ha=$(fv $HOLD adaptive_cc)
+[ "$(fv $HOLD adaptive_cc_hold_when_idle)" = "False" ] && ok "⑦ switch now reports off" || no "⑦ switch still on"
+[ "$ha" = "None" ] && ok "⑦ held value expired after hold was switched off on an idle pool ($hb → expired)" \
+                   || no "⑦ held value still $ha after hold was switched off and the pool sat idle past the TTL"
 
 echo "==== result: PASS=$P FAIL=$F ===="
 [ "$F" -eq 0 ] && echo "ALL GOOD" || echo "HAS FAILURES"
