@@ -36,7 +36,7 @@ setup-test-e2e: ## Create kind cluster $(KIND_CLUSTER) if it does not exist.
 .PHONY: test-e2e
 test-e2e: setup-test-e2e ## Run the e2e suite. Deletes the cluster on success unless KEEP_CLUSTER=1. A failure leaves the cluster up.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) IMG=$(IMG) \
-		go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT) $(E2E_ARGS)
+		go -C test/e2e test -tags=e2e . -v -ginkgo.v -timeout $(E2E_TIMEOUT) $(E2E_ARGS)
 ifeq ($(KEEP_CLUSTER),1)
 	@echo "KEEP_CLUSTER=1: leaving $(KIND_CLUSTER) up (kubectl --context kind-$(KIND_CLUSTER))"
 else
