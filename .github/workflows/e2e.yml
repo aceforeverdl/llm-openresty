@@ -1,10 +1,10 @@
 name: e2e
 
 # test/e2e on a kind cluster: the router image built from this checkout, one
-# route backed by the repo's mock vLLM, exercised through the path dispatch.
+# route backed by modelsphere/mock-llmd, exercised through the path dispatch.
 # Runs on every pull request and push to main, and on workflow_dispatch.
 # Not a required check: it pulls the base image, OpenResty packages and the
-# mock's python image from the internet.
+# mock-llmd image from the internet.
 on:
   push:
     branches:

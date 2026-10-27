@@ -19,8 +19,8 @@ import (
 const apiTimeout = 60 * time.Second
 
 // The kind counterpart of test/test_path_routing_e2e.sh: the real image, the
-// real standalone manifest shape, one route ("mock") whose only peer is the
-// repo's mock vLLM, everything reached through the 8080 path dispatch.
+// real standalone manifest shape, one route ("mock") whose only peer is
+// modelsphere/mock-llmd, everything reached through the 8080 path dispatch.
 var _ = Describe("openresty router", Ordered, Label("router"), func() {
 	AfterEach(func() {
 		if CurrentSpecReport().Failed() {
@@ -64,7 +64,7 @@ var _ = Describe("openresty router", Ordered, Label("router"), func() {
 		}
 		Expect(json.Unmarshal([]byte(body), &resp)).To(Succeed(), body)
 		Expect(resp.Data).To(HaveLen(1))
-		// The id is the mock's --name: only the mock answers this.
+		// The id is the mock's MOCK_MODEL_IDS value: only the mock answers this.
 		Expect(resp.Data[0].ID).To(Equal("mock-llm"))
 	})
 

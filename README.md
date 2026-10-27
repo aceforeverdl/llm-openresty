@@ -295,7 +295,8 @@ cd test
 ```
 
 The Kubernetes e2e suite under `test/e2e/` runs the image built from this
-checkout on a kind cluster (CPU only): one route backed by the mock vLLM,
+checkout on a kind cluster (CPU only): one route backed by
+modelsphere/mock-llmd, the project's standalone mock LLM server,
 exercised through the 8080 path dispatch. It is what CI runs on pull requests
 and pushes to `main`.
 

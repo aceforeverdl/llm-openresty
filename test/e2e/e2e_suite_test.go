@@ -165,20 +165,6 @@ func installMockAndRouter() {
 	out, err := run(applyNs)
 	Expect(err).NotTo(HaveOccurred(), out)
 
-	By("creating the mock ConfigMap from test/mock_vllm_sse.py")
-	gen := exec.Command(cfg.kubectlBin, "--context", cfg.context,
-		"create", "configmap", "mock-vllm", "-n", namespace,
-		"--from-file=mock_vllm_sse.py="+filepath.Join(root, "test", "mock_vllm_sse.py"),
-		"--dry-run=client", "-o", "yaml")
-	gen.Dir = root
-	manifest, err := gen.Output()
-	Expect(err).NotTo(HaveOccurred())
-
-	apply := exec.Command(cfg.kubectlBin, "--context", cfg.context, "apply", "-f", "-")
-	apply.Stdin = bytes.NewReader(manifest)
-	out, err = run(apply)
-	Expect(err).NotTo(HaveOccurred(), out)
-
 	By("applying testdata/k8s.yaml")
 	mustKubectl("apply", "-f", filepath.Join(root, "test", "e2e", "testdata", "k8s.yaml"))
 

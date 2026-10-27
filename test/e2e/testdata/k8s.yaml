@@ -1,7 +1,7 @@
 # E2E fixture: the standalone manifest shape from k8s/deployment.yaml, with
-# the routes ConfigMap filled with one route ("mock") whose only peer is the
-# repo's mock vLLM (test/mock_vllm_sse.py, mounted from the mock-vllm
-# ConfigMap the suite creates). Differences from k8s/deployment.yaml, all
+# the routes ConfigMap filled with one route ("mock") whose only peer is
+# modelsphere/mock-llmd, the project's standalone mock LLM server.
+# Differences from k8s/deployment.yaml, all
 # e2e-only: the image is the one built from this checkout (the suite loads it
 # into kind and sets it on the deployment), resources are sized for a kind
 # node, and terminationGracePeriodSeconds is 30 -- the production 3600 exists
@@ -23,7 +23,7 @@ data:
         server_name _;
         set $route "mock";
         set_by_lua_block $__mock_init { _G.register_route("mock", function() return {
-            peers={{"mock-upstream.openresty.svc.cluster.local",8000,"mock-llm"}}, default_max=50, bodylog_default_enabled=false,
+            peers={{"mock-upstream.openresty.svc.cluster.local",8081,"mock-llm"}}, default_max=50, bodylog_default_enabled=false,
             health_check_interval=9999, adaptive_cc=false } end) return "" }
         include conf.d/router_locations.inc;
     }
@@ -44,29 +44,23 @@ spec:
     spec:
       containers:
       - name: mock
-        image: python:3.12-alpine
+        # One static Go binary; MOCK_MODEL_IDS is the id /v1/models advertises
+        # and MOCK_SERVER_NAME is stamped on its responses.
+        image: ghcr.io/modelsphere/mock-llmd:0.1.0
         imagePullPolicy: IfNotPresent
-        # The mock needs aiohttp, which the alpine python image does not ship.
-        command: ["/bin/sh", "-c"]
-        args:
-          - pip install --no-cache-dir -q aiohttp && exec python3 /mock/mock_vllm_sse.py
-              --port 8000 --name mock-llm
-              --output-len 20 --chunk-delay-ms 10 --prefill-delay-ms 20
+        env:
+        - { name: MOCK_MODEL_IDS, value: "mock-llm" }
+        - { name: MOCK_SERVER_NAME, value: "mock-llm" }
         ports:
-        - { name: http, containerPort: 8000 }
+        - { name: http, containerPort: 8081 }
         readinessProbe:
-          httpGet: { path: /v1/models, port: 8000 }
-          initialDelaySeconds: 2
-          periodSeconds: 3
-          failureThreshold: 40
-        volumeMounts:
-        - { name: mock, mountPath: /mock }
+          httpGet: { path: /v1/models, port: 8081 }
+          initialDelaySeconds: 1
+          periodSeconds: 2
+          failureThreshold: 30
         resources:
-          requests: { cpu: 100m, memory: 128Mi }
-          limits: { cpu: 500m, memory: 512Mi }
-      volumes:
-      - name: mock
-        configMap: { name: mock-vllm }
+          requests: { cpu: 10m, memory: 32Mi }
+          limits: { cpu: 250m, memory: 128Mi }
 ---
 apiVersion: v1
 kind: Service
@@ -77,7 +71,7 @@ metadata:
 spec:
   selector: { app: mock-upstream }
   ports:
-  - { name: http, port: 8000, targetPort: 8000 }
+  - { name: http, port: 8081, targetPort: 8081 }
 ---
 apiVersion: apps/v1
 kind: Deployment
